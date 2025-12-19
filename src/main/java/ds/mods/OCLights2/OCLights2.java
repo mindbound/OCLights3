@@ -19,21 +19,25 @@ import cpw.mods.fml.relauncher.Side;
 import ds.mods.OCLights2.network.PacketHandler;
 import ds.mods.OCLights2.network.PacketHandler.PacketMessage;
 
-@Mod(modid = "OCLights2", name = "OCLights2", version = "0.4.5",dependencies="required-after:OpenComputers",acceptedMinecraftVersions = "1.7.10")
+@Mod(modid = Tags.MOD_ID,
+     name = Tags.MOD_NAME,
+     version = Tags.MOD_VERSION,
+     dependencies = "required-after:OpenComputers",
+     acceptedMinecraftVersions = "1.7.10")
 public class OCLights2 {
-	@Mod.Instance("OCLights2")
+	@Mod.Instance(Tags.MOD_ID)
 	public static OCLights2 instance;
 	
-	@SidedProxy(serverSide = "ds.mods.OCLights2.CommonProxy", clientSide = "ds.mods.OCLights2.client.ClientProxy")
+	@SidedProxy(serverSide = Tags.ROOT_PKG + ".CommonProxy", clientSide = Tags.ROOT_PKG + ".client.ClientProxy")
 	public static CommonProxy proxy;
 	
 	public static Block gpu,monitor,monitorBig,light,advancedlight,ttrans;
 	public static Item ram,tablet;
 	public static Logger logger;
 	
-	public static SimpleNetworkWrapper network = new SimpleNetworkWrapper("OCLights2");
+	public static SimpleNetworkWrapper network = new SimpleNetworkWrapper(Tags.MOD_ID);
 	
-	public static CreativeTabs ocltab = new CreativeTabs("OCLights2") {
+	public static CreativeTabs ocltab = new CreativeTabs(Tags.MOD_ID) {
 		@Override
 		public ItemStack getIconItemStack() {
 			this.getTranslatedTabLabel();

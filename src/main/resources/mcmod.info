@@ -1,16 +1,20 @@
 [
-{
-  "modid" : "OCLights2",
-  "name" : "OCLights 2",
-  "version" : "0.4.5",
-  "url" : "ds84182.no-ip.info",
-  "credits" : "Visit the github repo!",
-  "authors": [
-    "ds84182",
-    "Alekso56",
-    "gamax92"
-  ],
-  "description": "OCLights 2 adds very advanced monitors and tablets to minecraft.",
-  "logoFile" : "assets/OCLights2/textures/items/ram.png"
-}
+  {
+    "modid": "${modId}",
+    "name": "${modName}",
+    "description": "OCLights 2 adds very advanced monitors and tablets to minecraft.",
+    "version": "${modVersion}",
+    "mcversion": "${minecraftVersion}",
+    "url": "https://github.com/basdxz/OCLights2",
+    "updateUrl": "",
+    "authorList": [
+      "ds84182",
+      "Alekso56",
+      "gamax92"
+    ],
+    "credits": "Visit the github repo!",
+    "logoFile": "assets/oclights/textures/items/ram.png",
+    "screenshots": [],
+    "dependencies": []
+  }
 ]
