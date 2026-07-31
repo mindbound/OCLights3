@@ -280,4 +280,7 @@ gradle-app.setting
 # Java heap dump
 *.hprof
 
+# Internal development documentation
+docs/
+
 # End of https://www.toptal.com/developers/gitignore/api/java,scala,gradle,kotlin,forgegradle,intellij+all,eclipse,emacs
