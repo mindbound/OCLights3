@@ -94,7 +94,7 @@ public final class BatchCodec {
 		}
 	}
 
-	private static void writeCommands(DataOutputStream out, java.util.List<CanvasCommand> commands) throws IOException {
+	static void writeCommands(DataOutputStream out, java.util.List<CanvasCommand> commands) throws IOException {
 		out.writeInt(commands.size());
 		for (CanvasCommand cmd : commands) {
 			out.writeByte(cmd.op);
@@ -192,7 +192,7 @@ public final class BatchCodec {
 		}
 	}
 
-	private static ArrayList<CanvasCommand> readCommands(DataInputStream in) throws IOException, CodecException {
+	static ArrayList<CanvasCommand> readCommands(DataInputStream in) throws IOException, CodecException {
 		int count = in.readInt();
 		if (count < 0 || count > V2Wire.MAX_COMMANDS)
 			throw new CodecException("Command count out of range: " + count);

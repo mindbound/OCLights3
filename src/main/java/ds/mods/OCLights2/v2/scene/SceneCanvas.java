@@ -169,6 +169,9 @@ public final class SceneCanvas {
 		c.colorB = colorB;
 		c.colorA = colorA;
 		c.transformTouched = transformTouched;
+		// pushDepth is replay state like the rest: dropping it here caused silent
+		// post-resync compaction divergence (ORIGIN re-armed on one side only).
+		c.pushDepth = pushDepth;
 		return c;
 	}
 

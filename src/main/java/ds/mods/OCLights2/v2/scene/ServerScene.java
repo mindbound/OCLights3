@@ -44,6 +44,11 @@ public final class ServerScene {
 		return seq;
 	}
 
+	/** True while mutations are staged for the current tick's (unsealed) batch. */
+	public boolean hasStagedDeltas() {
+		return !staged.isEmpty();
+	}
+
 	public void setCurrentTick(long tick) {
 		currentTick = tick;
 	}
