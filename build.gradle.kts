@@ -25,6 +25,7 @@ minecraft_fp {
 
 repositories {
     exclusive(horizon(), "com.github.GTNewHorizons")
+    mavenCentral()
 }
 
 dependencies {
@@ -34,4 +35,5 @@ dependencies {
     runtimeOnly("com.github.GTNewHorizons:OpenComputers:1.12.55-GTNH:dev") {
         excludeDeps()
     }
+    testImplementation("junit:junit:4.13.2")
 }
