@@ -11,9 +11,11 @@ import org.apache.logging.log4j.Logger;
 
 import cpw.mods.fml.common.Mod;
 import cpw.mods.fml.common.SidedProxy;
+import cpw.mods.fml.common.event.FMLMissingMappingsEvent;
 import cpw.mods.fml.common.event.FMLPostInitializationEvent;
 import cpw.mods.fml.common.event.FMLPreInitializationEvent;
 import cpw.mods.fml.common.network.NetworkRegistry;
+import cpw.mods.fml.common.registry.GameRegistry;
 import cpw.mods.fml.common.network.simpleimpl.SimpleNetworkWrapper;
 import cpw.mods.fml.relauncher.Side;
 import ds.mods.OCLights2.network.PacketHandler;
@@ -58,6 +60,36 @@ public class OCLights2 {
 		proxy.registerBlocks();
         
 		logger.log(Level.INFO, "STANDING BY");
+	}
+
+	@Mod.EventHandler
+	public void missingMappings(FMLMissingMappingsEvent event) {
+		// Worlds created before the OCLights3 rename store block/item ids under the
+		// "OCLights2" domain. The disabled light blocks are intentionally not remapped.
+		for (FMLMissingMappingsEvent.MissingMapping mapping : event.getAll()) {
+			if (!mapping.name.startsWith("OCLights2:")) {
+				continue;
+			}
+			String name = mapping.name.substring(mapping.name.indexOf(':') + 1);
+			Block block = null;
+			Item item = null;
+			if (name.equals("OCLGPU")) block = gpu;
+			else if (name.equals("OCLMonitor")) block = monitor;
+			else if (name.equals("OCLBigMonitor")) block = monitorBig;
+			else if (name.equals("OCLTTrans")) block = ttrans;
+			else if (name.equals("OCLRAM")) item = ram;
+			else if (name.equals("OCLTab")) item = tablet;
+			if (mapping.type == GameRegistry.Type.BLOCK && block != null) {
+				mapping.remap(block);
+			} else if (mapping.type == GameRegistry.Type.ITEM) {
+				if (item == null && block != null) {
+					item = Item.getItemFromBlock(block);
+				}
+				if (item != null) {
+					mapping.remap(item);
+				}
+			}
+		}
 	}
 
 	@Mod.EventHandler

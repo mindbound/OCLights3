@@ -2,19 +2,19 @@
   {
     "modid": "${modId}",
     "name": "${modName}",
-    "description": "OCLights 2 adds very advanced monitors and tablets to minecraft.",
+    "description": "OCLights 3 adds GPU-driven pixel-graphics monitors and tablets for OpenComputers.",
     "version": "${modVersion}",
     "mcversion": "${minecraftVersion}",
-    "url": "https://github.com/basdxz/OCLights2",
+    "url": "https://github.com/mindbound/OCLights3",
     "updateUrl": "",
     "authorList": [
       "ds84182",
       "Alekso56",
       "gamax92"
     ],
-    "credits": "Visit the github repo!",
+    "credits": "OCLights3 revival fork; based on OCLights2 / CCLights2 by ds84182 et al.",
     "logoFile": "assets/oclights/textures/items/ram.png",
     "screenshots": [],
-    "dependencies": []
+    "dependencies": ["OpenComputers"]
   }
 ]

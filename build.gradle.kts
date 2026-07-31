@@ -6,8 +6,8 @@ group = "ds.mods"
 
 minecraft_fp {
     mod {
-        modid   = "OCLights2"
-        name    = "OCLights 2"
+        modid   = "OCLights3"
+        name    = "OCLights 3"
         rootPkg = "$group.OCLights2"
     }
 
@@ -28,10 +28,10 @@ repositories {
 }
 
 dependencies {
-    compileOnly("com.github.GTNewHorizons:OpenComputers:1.12.8-GTNH:api") {
+    compileOnly("com.github.GTNewHorizons:OpenComputers:1.12.55-GTNH:api") {
         excludeDeps()
     }
-    runtimeOnly("com.github.GTNewHorizons:OpenComputers:1.12.8-GTNH:dev") {
+    runtimeOnly("com.github.GTNewHorizons:OpenComputers:1.12.55-GTNH:dev") {
         excludeDeps()
     }
 }

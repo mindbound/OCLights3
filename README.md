@@ -1,10 +1,26 @@
-OCLights 2 is a Open Source Minecraft mod that adds a Peripheral for OpenComputers. The GPU Peripheral is capable of rendering draw commands and outputting them to a Monitor, which has a right clickable GUI to use your mouse and keyboard to control actions. This gives a whole new experience for OpenComputers.
+# OCLights 3
 
-You can find the releases of this mod here: [OCLights 2 Download](https://github.com/basdxz/OCLights2/releases)
+OCLights 3 is an open-source Minecraft 1.7.10 mod that adds a **GPU peripheral for
+[OpenComputers](https://github.com/GTNewHorizons/OpenComputers)**: pixel-graphics rendering to
+dedicated monitors, multi-block external monitors, and remote tablets — in contrast to OC's
+built-in character-cell screens.
 
-This fork is built against the GT:NH fork of OpenComputers: [OpenComputers Download](https://github.com/GTNewHorizons/OpenComputers/releases)
+It is a revival fork of the abandoned **OCLights2** (itself an OpenComputers port of
+[CCLights2](https://github.com/ds84182/CCLights2) by ds84182), built against the GT New Horizons
+fork of OpenComputers. Worlds from OCLights2 are remapped automatically.
 
-TODO:
--  Make Network code more efficent (Note: This should never be checked off, because the network code always needs to be more efficent)
--  Add border to Monitor GUI (Both Tablet and Regular Monitor)
--  Add texture to external monitors
+**Status:** early revival. See [docs/dev](docs/dev/README.md) for the project charter,
+architecture notes, the verified issues register, and the roadmap.
+
+## Building
+
+Requires a JVM 21+ to run Gradle (the mod itself targets Java 8 / MC 1.7.10; compile toolchains
+are provisioned automatically):
+
+```
+./gradlew build
+```
+
+## License
+
+[MMPL-1.0](LICENSE.md), continued from CCLights2/OCLights2.

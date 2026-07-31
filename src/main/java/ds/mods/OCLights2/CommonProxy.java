@@ -33,20 +33,20 @@ public class CommonProxy {
 			OCLights2.gpu = new BlockGPU(Material.iron);
 			
 			GameRegistry.registerBlock(OCLights2.gpu, "OCLGPU");
-			GameRegistry.registerTileEntity(TileEntityGPU.class, "GPU");
+			GameRegistry.registerTileEntityWithAlternatives(TileEntityGPU.class, Tags.MOD_ID + ":gpu", "GPU");
 			gpu = true;
 
 			OCLights2.monitor = new BlockMonitor(Material.iron);
 			
 			GameRegistry.registerBlock(OCLights2.monitor, "OCLMonitor");
-			GameRegistry.registerTileEntity(TileEntityMonitor.class, "OCLMonitorTE");
+			GameRegistry.registerTileEntityWithAlternatives(TileEntityMonitor.class, Tags.MOD_ID + ":monitor", "OCLMonitorTE");
 			
 			monitor = true;
 
 			OCLights2.monitorBig = new BlockExternalMonitor(Material.iron);
 			
 			GameRegistry.registerBlock(OCLights2.monitorBig, "OCLBigMonitor");
-			GameRegistry.registerTileEntity(TileEntityExternalMonitor.class, "OCLBigMonitorTE");
+			GameRegistry.registerTileEntityWithAlternatives(TileEntityExternalMonitor.class, Tags.MOD_ID + ":external_monitor", "OCLBigMonitorTE");
 			
 			monitorBig = true;
 
@@ -68,7 +68,7 @@ public class CommonProxy {
 			OCLights2.ttrans = new BlockTabletTransceiver(Material.iron);
 			
 			GameRegistry.registerBlock(OCLights2.ttrans, "OCLTTrans");
-			GameRegistry.registerTileEntity(TileEntityTTrans.class, "OCLTTransTE");
+			GameRegistry.registerTileEntityWithAlternatives(TileEntityTTrans.class, Tags.MOD_ID + ":tablet_transceiver", "OCLTTransTE");
 			
 			ttrans = true;
 
