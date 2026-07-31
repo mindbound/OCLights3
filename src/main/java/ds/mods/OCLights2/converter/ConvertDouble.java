@@ -3,9 +3,12 @@ package ds.mods.OCLights2.converter;
 public class ConvertDouble {
 	public static Double convert(Object obj) throws Exception
 	{
-		if (obj instanceof Double)
-			return (Double) obj;
+		// OC boxes integral Lua numbers as Long under Lua 5.3/5.4, Double under 5.2.
+		if (obj instanceof Number)
+			return ((Number) obj).doubleValue();
+		else if (obj == null)
+			throw new Exception("number expected, got nil");
 		else
-			throw new Exception("double expected, got "+obj.getClass().getName());
+			throw new Exception("number expected, got "+obj.getClass().getName());
 	}
 }

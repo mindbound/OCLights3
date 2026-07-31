@@ -281,6 +281,6 @@ gradle-app.setting
 *.hprof
 
 # Internal development documentation
-docs/
+**/docs/
 
 # End of https://www.toptal.com/developers/gitignore/api/java,scala,gradle,kotlin,forgegradle,intellij+all,eclipse,emacs

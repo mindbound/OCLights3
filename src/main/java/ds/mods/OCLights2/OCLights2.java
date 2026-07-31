@@ -54,8 +54,9 @@ public class OCLights2 {
 
 	@Mod.EventHandler
 	public void preInit(FMLPreInitializationEvent event) {
-		Config.loadConfig(new Configuration(event.getSuggestedConfigurationFile()));
+		// Config.parse logs through OCLights2.logger on malformed values — assign it first.
 		logger = event.getModLog();
+		Config.loadConfig(new Configuration(event.getSuggestedConfigurationFile()));
 		
 		proxy.registerBlocks();
         

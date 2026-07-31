@@ -9,6 +9,7 @@ import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
+import net.minecraft.tileentity.TileEntity;
 import net.minecraft.world.World;
 import cpw.mods.fml.relauncher.Side;
 import cpw.mods.fml.relauncher.SideOnly;
@@ -37,15 +38,18 @@ public class ItemTablet extends Item {
 
 	@Override
 	public ItemStack onItemRightClick(ItemStack par1ItemStack, World par3World, EntityPlayer Player) {
+		NBTTagCompound nbt = getNBT(par1ItemStack, par3World);
 		if(Player.isSneaking()){
-			if (par1ItemStack.getTagCompound().getBoolean("canDisplay") && par3World.isRemote) {
-				UUID trans = UUID.fromString(par1ItemStack.getTagCompound().getString("trans"));
-				if(TabletRenderer.isInOfRange(trans)){
-				TileEntityTTrans tile = (TileEntityTTrans) par3World.getTileEntity(
+			if (nbt.getBoolean("canDisplay") && par3World.isRemote) {
+				UUID trans = UUID.fromString(nbt.getString("trans"));
+				if (TabMesg.getTabVar(trans, "x") != null && TabletRenderer.isInOfRange(trans)) {
+					TileEntity te = par3World.getTileEntity(
 								(Integer) TabMesg.getTabVar(trans, "x"),
 								(Integer) TabMesg.getTabVar(trans, "y"),
 								(Integer) TabMesg.getTabVar(trans, "z"));
-				ClientTickHandler.tile = tile;
+					if (te instanceof TileEntityTTrans) {
+						ClientTickHandler.tile = (TileEntityTTrans) te;
+					}
 				}
 			}
 		}
@@ -60,13 +64,16 @@ public class ItemTablet extends Item {
 			EntityPlayer par2EntityPlayer, World par3World, int par4, int par5,
 			int par6, int par7, float par8, float par9, float par10) {
 		NBTTagCompound nbt = getNBT(par1ItemStack,par3World);
-		
+
 		if (!par3World.isRemote && Block.isEqualTo(OCLights2.ttrans, par3World.getBlock(par4, par5, par6)))
 		{
-			nbt.setBoolean("canDisplay",true);
-			TileEntityTTrans tile = (TileEntityTTrans) par3World.getTileEntity(par4, par5, par6);
-			nbt.setString("trans", tile.id.toString());
-			TabMesg.pushMessage(tile.id, new Message("connect",UUID.fromString(nbt.getString("uuid"))));
+			TileEntity te = par3World.getTileEntity(par4, par5, par6);
+			if (te instanceof TileEntityTTrans) {
+				TileEntityTTrans tile = (TileEntityTTrans) te;
+				nbt.setBoolean("canDisplay",true);
+				nbt.setString("trans", tile.id.toString());
+				TabMesg.pushMessage(tile.id, new Message("connect",UUID.fromString(nbt.getString("uuid"))));
+			}
 			return false;
 		}
 		return false;
@@ -92,6 +99,16 @@ public class ItemTablet extends Item {
 		{
 			nbt = createNBT(parWorld);
 			item.setTagCompound(nbt);
+		}
+		// Self-heal partial tags (renamed/command-given tablets): a tag without these keys
+		// crashed pairing on UUID.fromString("").
+		if (!nbt.hasKey("uuid"))
+		{
+			nbt.setString("uuid", UUID.randomUUID().toString());
+		}
+		if (!nbt.hasKey("canDisplay"))
+		{
+			nbt.setBoolean("canDisplay", false);
 		}
 		return nbt;
 	}

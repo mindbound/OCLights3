@@ -1,6 +1,7 @@
 package ds.mods.OCLights2;
 
 import net.minecraft.entity.player.EntityPlayer;
+import net.minecraft.item.ItemStack;
 import net.minecraft.tileentity.TileEntity;
 import net.minecraft.world.World;
 import cpw.mods.fml.common.network.IGuiHandler;
@@ -21,13 +22,20 @@ public class GuiHandler implements IGuiHandler {
 		
 		switch (ID)
 		{
-		case 0:
+		case 0: {
 			TileEntity tile_entity = world.getTileEntity(x, y, z);
 			if(tile_entity instanceof TileEntityMonitor) {
 				return new GuiMonitor(((TileEntityMonitor) tile_entity));
 			}
-		case 1:
-			return new GuiTablet(player.getHeldItem().getTagCompound(),world);
+			return null;
+		}
+		case 1: {
+			ItemStack held = player.getHeldItem();
+			if (held == null || held.getTagCompound() == null) {
+				return null;
+			}
+			return new GuiTablet(held.getTagCompound(), world);
+		}
 		}
 		return null;
 	}

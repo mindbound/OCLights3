@@ -6,6 +6,7 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.zip.GZIPInputStream;
 
@@ -269,10 +270,18 @@ public class PacketHandlerIMPL {
 							thread.setName("OCLights2 Draw Thread");
 							thread.start();
 						}
-						if (thread.draws.get(tile.gpu) == null) {
-							thread.draws.put(tile.gpu, new ArrayDeque<DrawCMD>());
+						// The draw thread iterates under synchronized(draws) and polls under
+						// synchronized(queue); the producer must hold the same monitors.
+						synchronized (thread.draws) {
+							Deque<DrawCMD> queue = thread.draws.get(tile.gpu);
+							if (queue == null) {
+								queue = new ArrayDeque<DrawCMD>();
+								thread.draws.put(tile.gpu, queue);
+							}
+							synchronized (queue) {
+								queue.addLast(cmd);
+							}
 						}
-						thread.draws.get(tile.gpu).addLast(cmd);
 					}
 				}
 			}

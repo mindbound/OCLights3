@@ -5,15 +5,16 @@ import java.awt.geom.AffineTransform;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.Stack;
+import java.util.concurrent.ConcurrentLinkedDeque;
 
 import javax.imageio.ImageIO;
 
 import org.apache.commons.lang3.ArrayUtils;
 
+import ds.mods.OCLights2.CommandEnum;
 import ds.mods.OCLights2.block.tileentity.TileEntityGPU;
 import ds.mods.OCLights2.network.PacketSenders;
 
@@ -80,7 +81,8 @@ public class GPU {
 	public GPU(int gfxmem)
 	{
 		textures = new Texture[8192];
-		drawlist = new ArrayDeque<DrawCMD>();
+		// Pushed from OC executor threads while the tick thread drains; must be thread-safe.
+		drawlist = new ConcurrentLinkedDeque<DrawCMD>();
 		maxmem = gfxmem;
 	}
 	
@@ -176,12 +178,22 @@ public class GPU {
 	 */
 	public void bindTexture(int texid) throws Exception
 	{
-		if (texid < 0 && texid >= textures.length)
+		bindedTexture = getTexture(texid);
+		bindedSlot = texid;
+	}
+
+	/**
+	 * Returns the texture in the given slot, throwing if the id is out of range or the slot is empty
+	 * @param texid The texture id to look up
+	 * @throws Exception
+	 */
+	public Texture getTexture(int texid) throws Exception
+	{
+		if (texid < 0 || texid >= textures.length)
 			throw new Exception("Texture id out of range");
 		if (textures[texid] == null)
 			throw new Exception("Texture doesn't exist!");
-		bindedTexture = textures[texid];
-		bindedSlot = texid;
+		return textures[texid];
 	}
 	
 	/**
@@ -288,10 +300,16 @@ public class GPU {
 	{
 		if (cmd == null)
 			return null;
-		if (bindedTexture == null)
+		// CreateTexture/BindTexture/Import need no bound target and must run even when the
+		// binding is null, so a broken binding can always be repaired by the stream.
+		if (bindedTexture == null
+				&& cmd.cmd != CommandEnum.CreateTexture
+				&& cmd.cmd != CommandEnum.BindTexture
+				&& cmd.cmd != CommandEnum.Import)
 		{
 			return null;
 		}
+		if (bindedTexture != null)
 			bindedTexture.transform = transform;
 			switch(cmd.cmd)
 			{
@@ -318,11 +336,11 @@ public class GPU {
 					if ((Integer)cmd.args[0] == 0)
 					{
 						//Small version//
-						bindedTexture.drawTexture(textures[(Integer) cmd.args[1]], (Integer) cmd.args[2],(Integer) cmd.args[3], color);
+						bindedTexture.drawTexture(getTexture((Integer) cmd.args[1]), (Integer) cmd.args[2],(Integer) cmd.args[3], color);
 					}
 					else
 					{
-						bindedTexture.drawTexture(textures[(Integer) cmd.args[1]], (Integer) cmd.args[2],(Integer) cmd.args[3], (Integer) cmd.args[4],(Integer) cmd.args[5], (Integer) cmd.args[6],(Integer) cmd.args[7],color);
+						bindedTexture.drawTexture(getTexture((Integer) cmd.args[1]), (Integer) cmd.args[2],(Integer) cmd.args[3], (Integer) cmd.args[4],(Integer) cmd.args[5], (Integer) cmd.args[6],(Integer) cmd.args[7],color);
 					}
 					break;
 				}
@@ -340,19 +358,28 @@ public class GPU {
 				case BindTexture:
 				{
 					//Bind Texture//
-					bindedTexture = textures[(Integer) cmd.args[0]];
-					bindedSlot = (Integer) cmd.args[0];
+					try {
+						bindTexture((Integer) cmd.args[0]);
+					} catch (Exception e) {
+						// Client replay can reference a slot that has not synced yet; drop
+						// draws until a later bind succeeds instead of leaving a stale target.
+						bindedTexture = null;
+						throw e;
+					}
 					break;
 				}
 				case FreeTexture:
 				{
 					//Delete Texture//
-					if (bindedTexture == textures[(Integer) cmd.args[0]])
+					int freeid = (Integer) cmd.args[0];
+					if (freeid <= 0 || freeid >= textures.length)
+						throw new Exception("Cannot free texture " + freeid);
+					if (bindedTexture == textures[freeid])
 					{
 						bindedTexture = textures[0];
 						bindedSlot = 0;
 					}
-					textures[(Integer) cmd.args[0]] = null;
+					textures[freeid] = null;
 					break;
 				}
 				case Rectangle:
@@ -387,7 +414,7 @@ public class GPU {
 				}
 				case SetPixels:
 				{
-					int i = 4;
+					int i = 5;
 					for (int x = 0; x<(Integer)cmd.args[1]; x++)
 					{
 					 for (int y = 0; y<(Integer)cmd.args[2]; y++)
@@ -399,7 +426,7 @@ public class GPU {
 				}
 				case FlipVertically:
 				{
-					textures[(Integer) cmd.args[0]].flipV();
+					getTexture((Integer) cmd.args[0]).flipV();
 					break;
 				}
 				case Import:
@@ -473,7 +500,7 @@ public class GPU {
 				}
 				case Blur:
 				{
-					textures[(Integer) cmd.args[0]].blur();
+					getTexture((Integer) cmd.args[0]).blur();
 					break;
 				}
 				case ClearRectangle:
@@ -508,13 +535,17 @@ public class GPU {
 	 */
 	public void processSendList()
 	{
+		if (tile.getWorldObj().isRemote)
+		{
+			drawlist.clear();
+			return;
+		}
 		if (!drawlist.isEmpty())
 		{
-			if (!tile.getWorldObj().isRemote)
-			{
-		    	PacketSenders.sendPacketsNow(drawlist,tile);
-			}
-			drawlist.clear();
+			// sendPacketsNow drains the deque itself; the batch count is taken after the
+			// drain, so it always matches the serialized commands. Pushes arriving after
+			// the drain completes stay queued for next tick.
+			PacketSenders.sendPacketsNow(drawlist,tile);
 		}
 	}
 }

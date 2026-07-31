@@ -6,6 +6,7 @@ import java.awt.geom.AffineTransform;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Deque;
 import java.util.Iterator;
 import java.util.Locale;
@@ -40,14 +41,20 @@ public final class PacketSenders {
 			throw new IllegalArgumentException(
 					"GPU cannot send packet without Tile Entity!");
 		}
+		// Drain before writing the count: pushes race in from OC executor threads, and the
+		// count must match the commands actually serialized.
+		ArrayList<DrawCMD> batch = new ArrayList<DrawCMD>();
+		DrawCMD next;
+		while ((next = drawlist.pollLast()) != null) {
+			batch.add(next);
+		}
 		ByteArrayDataOutput outputStream = ByteStreams.newDataOutput();
 		outputStream.writeByte(PacketHandlerIMPL.NET_GPUDRAWLIST);
 		outputStream.writeInt(tile.xCoord);
 		outputStream.writeInt(tile.yCoord);
 		outputStream.writeInt(tile.zCoord);
-		outputStream.writeInt(drawlist.size());
-		while (!drawlist.isEmpty()) {
-			DrawCMD c = drawlist.removeLast();
+		outputStream.writeInt(batch.size());
+		for (DrawCMD c : batch) {
 			outputStream.writeInt(c.cmd.ordinal());
 			outputStream.writeInt(c.args.length);
 			for (int g = 0; g < c.args.length; g++) {

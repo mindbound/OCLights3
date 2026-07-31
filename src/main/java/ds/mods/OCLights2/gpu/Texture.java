@@ -307,13 +307,21 @@ public class Texture {
 	}
 	
 	/**
-	 * Flip the texture vertically (this may not work at all)
+	 * Flip the texture vertically
 	 */
 	public void flipV()
 	{
-		AffineTransform trans = new AffineTransform();
-		trans.scale(1, -1);
-		graphics.drawImage(img, trans, null);
+		// Flip into a copy first: drawing img onto its own graphics mid-flip reads
+		// already-overwritten rows.
+		BufferedImage flipped = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+		Graphics2D fg = flipped.createGraphics();
+		fg.drawImage(img, 0, 0, width, height, 0, height, width, 0, null);
+		fg.dispose();
+		java.awt.Composite oldComposite = graphics.getComposite();
+		graphics.setTransform(resetTransform);
+		graphics.setComposite(java.awt.AlphaComposite.Src);
+		graphics.drawImage(flipped, 0, 0, null);
+		graphics.setComposite(oldComposite);
 	}
 	
 	/**

@@ -1,6 +1,5 @@
 package ds.mods.OCLights2.client.gui;
 
-import java.awt.Color;
 import java.util.UUID;
 
 import net.minecraft.client.Minecraft;
@@ -9,6 +8,7 @@ import net.minecraft.client.gui.ScaledResolution;
 import net.minecraft.client.renderer.Tessellator;
 import net.minecraft.client.renderer.texture.TextureUtil;
 import net.minecraft.nbt.NBTTagCompound;
+import net.minecraft.tileentity.TileEntity;
 import net.minecraft.world.World;
 
 import org.lwjgl.input.Keyboard;
@@ -41,19 +41,20 @@ public class GuiTablet extends GuiScreen {
 		nbt = n;
 		if (nbt.getBoolean("canDisplay")) {
 			UUID trans = UUID.fromString(nbt.getString("trans"));
-			tile = (TileEntityTTrans) Minecraft.getMinecraft().theWorld
-					.getTileEntity(
-							(Integer) TabMesg.getTabVar(trans, "x"),
-							(Integer) TabMesg.getTabVar(trans, "y"),
-							(Integer) TabMesg.getTabVar(trans, "z"));
-			if(TabletRenderer.isInOfRange(trans)){
-			mon = tile.mon;
-			tex = mon.tex;
+			Object tx = TabMesg.getTabVar(trans, "x");
+			Object ty = TabMesg.getTabVar(trans, "y");
+			Object tz = TabMesg.getTabVar(trans, "z");
+			TileEntity te = null;
+			if (tx != null && ty != null && tz != null) {
+				te = Minecraft.getMinecraft().theWorld.getTileEntity((Integer) tx, (Integer) ty, (Integer) tz);
 			}
-			else{
-				tex.fill(Color.red);
-				tex.drawText("Out of range.", 0, 0, Color.white);
-				tex.texUpdate();
+			if (te instanceof TileEntityTTrans && TabletRenderer.isInOfRange(trans)) {
+				tile = (TileEntityTTrans) te;
+				mon = tile.mon;
+				tex = mon.tex;
+			} else {
+				// Never draw onto the shared defaultTexture; errorTexture already shows "Out of range."
+				tex = TabletRenderer.errorTexture;
 			}
 		}
 	}
@@ -92,7 +93,7 @@ public class GuiTablet extends GuiScreen {
 	public void drawScreen(int x, int y, float par3) {
 		x = applyXOffset(x);
 		y = applyYOffset(y);
-		if (nbt.getBoolean("canDisplay")) {
+		if (nbt.getBoolean("canDisplay") && tile != null && mon != null) {
 			int wheel = Mouse.getDWheel();
 			if (wheel != 0) {
 				PacketSenders.GPUEvent(x, y, tile, wheel);
@@ -151,7 +152,7 @@ public class GuiTablet extends GuiScreen {
 
 	@Override
 	protected void mouseClicked(int par1, int par2, int par3) {
-		if (!nbt.getBoolean("canDisplay")) return;
+		if (!nbt.getBoolean("canDisplay") || tile == null || mon == null) return;
 		par1 = applyXOffset(par1);
 		par2 = applyYOffset(par2);
 		if (par1 > -1 & par2 > -1 & par1 < mon.getWidth() + 1
@@ -168,7 +169,7 @@ public class GuiTablet extends GuiScreen {
 
 	@Override
 	protected void mouseMovedOrUp(int par1, int par2, int par3) {
-		if (!nbt.getBoolean("canDisplay"))
+		if (!nbt.getBoolean("canDisplay") || tile == null)
 			return;
 		par1 = applyXOffset(par1);
 		par2 = applyYOffset(par2);
@@ -191,14 +192,14 @@ public class GuiTablet extends GuiScreen {
 	@Override
 	protected void keyTyped(char par1, int par2) {
 		super.keyTyped(par1, par2);
-		if (par2 != 1 && nbt.getBoolean("canDisplay")) {
+		if (par2 != 1 && nbt.getBoolean("canDisplay") && tile != null) {
 			PacketSenders.sendKeyEvent(par1, par2, tile);
 		}
 	}
-	
+
 	protected void keyRelease(char par1, int par2)
 	{
-        if (par2 != 1)
+        if (par2 != 1 && nbt.getBoolean("canDisplay") && tile != null)
         {
         	PacketSenders.sendKeyEventUp(par1, par2, tile);
         }

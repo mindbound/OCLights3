@@ -41,7 +41,6 @@ import cpw.mods.fml.common.FMLCommonHandler;
 import cpw.mods.fml.relauncher.Side;
 import ds.mods.OCLights2.CommandEnum;
 import ds.mods.OCLights2.OCLights2;
-import ds.mods.OCLights2.converter.ConvertInteger;
 import ds.mods.OCLights2.gpu.DrawCMD;
 import ds.mods.OCLights2.gpu.GPU;
 import ds.mods.OCLights2.gpu.Monitor;
@@ -71,6 +70,19 @@ public class TileEntityGPU extends TileEntity implements Environment {
 		node = Network.newNode(this, Visibility.Network).withComponent("ocl_gpu").create();
 	}
 
+	// Lua-table numeric lookup: integral keys and values arrive as Long under Lua 5.3/5.4
+	// and as Double under 5.2 — accept both.
+	private static Number tableNumber(Map<?, ?> m, int index) throws Exception {
+		Object v = m.get((double) index);
+		if (v == null)
+			v = m.get((long) index);
+		if (v instanceof Number)
+			return (Number) v;
+		if (v == null)
+			throw new Exception("number expected at table index " + index + ", got nil");
+		throw new Exception("number expected at table index " + index + ", got " + v.getClass().getName());
+	}
+
 	public void startClick(EntityPlayer player, int button, int x, int y) {
 		int id = new Random().nextInt();
 		while (playerToClickMap.containsValue(id)) {
@@ -87,8 +99,13 @@ public class TileEntityGPU extends TileEntity implements Environment {
 	}
 
 	public void moveClick(EntityPlayer player, int nx, int ny) {
-		int id = playerToClickMap.get(player.getDisplayName());
+		// Client packets can deliver a move/up without a preceding down.
+		Integer id = playerToClickMap.get(player.getDisplayName());
+		if (id == null)
+			return;
 		int[] data = clickToDataMap.get(id);
+		if (data == null)
+			return;
 		int button = data[0];
 		data[1] = nx;
 		data[2] = ny;
@@ -101,8 +118,14 @@ public class TileEntityGPU extends TileEntity implements Environment {
 	}
 
 	public void endClick(EntityPlayer player) {
-		int id = playerToClickMap.get(player.getDisplayName());
+		Integer id = playerToClickMap.get(player.getDisplayName());
+		if (id == null)
+			return;
 		int[] data = clickToDataMap.get(id);
+		if (data == null) {
+			playerToClickMap.remove(player.getDisplayName());
+			return;
+		}
 		int button = data[0];
 		int x = data[1];
 		int y = data[2];
@@ -171,8 +194,7 @@ public class TileEntityGPU extends TileEntity implements Environment {
 	public Object[] bindTexture(Context context, Arguments args) throws Exception {
 		//bindTexture
 		if (args.count() > 0) {
-			if (gpu.textures[args.checkInteger(0)] == null)
-				throw new Exception("bindTexture: Texture does not exist");
+			gpu.getTexture(args.checkInteger(0));
 			DrawCMD cmd = new DrawCMD();
 			Object[] nargs = new Object[] { args.checkInteger(0) };
 			cmd.cmd = CommandEnum.BindTexture;
@@ -237,8 +259,12 @@ public class TileEntityGPU extends TileEntity implements Environment {
 	public Object[] freeTexture(Context context, Arguments args) throws Exception {
 		//freeTexture
 		if (args.count() == 1) {
+			int id = args.checkInteger(0);
+			if (id == 0)
+				throw new Exception("freeTexture: cannot free the monitor texture");
+			gpu.getTexture(id);
 			DrawCMD cmd = new DrawCMD();
-			Object[] nargs = new Object[] { args.checkInteger(0) };
+			Object[] nargs = new Object[] { id };
 			cmd.cmd = CommandEnum.FreeTexture;
 			cmd.args = nargs;
 			gpu.processCommand(cmd);
@@ -272,9 +298,7 @@ public class TileEntityGPU extends TileEntity implements Environment {
 		if (args.count() >= 1) {
 			tex = args.checkInteger(0);
 		}
-		if (gpu.textures[tex] == null)
-			throw new Exception("getSize: texture does not exist");
-		Texture texture = gpu.textures[tex];
+		Texture texture = gpu.getTexture(tex);
 		return new Object[] { texture.getWidth(), texture.getHeight() };
 	}
 
@@ -411,7 +435,7 @@ public class TileEntityGPU extends TileEntity implements Environment {
 			nargs[4] = args.checkInteger(3);
 			Map m = args.checkTable(4);
 			for (int i = 1; i <= (w * h * 4); i++) {
-				nargs[i + 4] = ConvertInteger.convert(m.get((double) i)).intValue();
+				nargs[i + 4] = tableNumber(m, i).intValue();
 			}
 			cmd.cmd = CommandEnum.SetPixels;
 			cmd.args = nargs;
@@ -447,8 +471,8 @@ public class TileEntityGPU extends TileEntity implements Environment {
 			//Double the fun! -alekso56
 			Map m = args.checkTable(0);
 			data = new Byte[m.size()];
-			for (double i = 0; i < data.length; i++) {
-				data[(int) i] = ((Double) m.get(i + 1D)).byteValue();
+			for (int i = 0; i < data.length; i++) {
+				data[i] = tableNumber(m, i + 1).byteValue();
 			}
 		} else if (args.count() == 1 && args.isString(0)) {
 			data = Convert.toByte(args.checkByteArray(0));
@@ -489,10 +513,7 @@ public class TileEntityGPU extends TileEntity implements Environment {
 		if (args.count() > 1) {
 			int texid = args.checkInteger(0);
 			String format = args.checkString(1);
-			if (texid < 0 || texid > gpu.textures.length || gpu.textures[texid] == null) {
-				throw new Exception("export: Texture does not exist.");
-			}
-			Texture tex = gpu.textures[texid];
+			Texture tex = gpu.getTexture(texid);
 			ByteArrayOutputStream output = new ByteArrayOutputStream();
 			ImageIO.write(tex.img, format, output);
 			byte[] data = output.toByteArray();
@@ -561,7 +582,7 @@ public class TileEntityGPU extends TileEntity implements Environment {
 			for (int i = 0; i < 4; i++) {
 				nargs[i] = args.count() > i ? args.checkInteger(i) : 255;
 			}
-			if (gpu.color.getRed() == (Integer) nargs[0] && gpu.color.getBlue() == (Integer) nargs[1] && gpu.color.getGreen() == (Integer) nargs[2] && gpu.color.getAlpha() == (Integer) nargs[3]) {
+			if (gpu.color.getRed() == (Integer) nargs[0] && gpu.color.getGreen() == (Integer) nargs[1] && gpu.color.getBlue() == (Integer) nargs[2] && gpu.color.getAlpha() == (Integer) nargs[3]) {
 				return null;
 			}
 			cmd.cmd = CommandEnum.SetColor;
@@ -748,8 +769,13 @@ public class TileEntityGPU extends TileEntity implements Environment {
 
 	@Override
 	public Packet getDescriptionPacket() {
+		// Slim on purpose: the full writeToNBT PNG-encodes every texture, which is both a
+		// packet-size hazard and redundant — clients pull full state via NET_GPUDOWNLOAD.
 		NBTTagCompound nbt = new NBTTagCompound();
-		this.writeToNBT(nbt);
+		super.writeToNBT(nbt);
+		nbt.setInteger("vram", gpu.maxmem);
+		nbt.setInteger("bindedSlot", gpu.bindedSlot);
+		nbt.setInteger("color", gpu.color.getRGB());
 		return new S35PacketUpdateTileEntity(this.xCoord, this.yCoord, this.zCoord, worldObj.provider.dimensionId, nbt);
 	}
 
@@ -795,10 +821,10 @@ public class TileEntityGPU extends TileEntity implements Environment {
 	@Override
 	public void readFromNBT(NBTTagCompound nbt) {
 		super.readFromNBT(nbt);
-		if (node != null && node.host() == this) {
+		if (node != null && node.host() == this && nbt.hasKey("oc:node")) {
 			node.load(nbt.getCompoundTag("oc:node"));
 		}
-		if (fileSystem.node() != null) {
+		if (fileSystem.node() != null && nbt.hasKey("oc:fsnode")) {
 			fileSystem.node().load(nbt.getCompoundTag("oc:fsnode"));
 		}
 		addedType = nbt.getIntArray("addedTypes");

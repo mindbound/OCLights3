@@ -91,7 +91,8 @@ public class TileEntityTTrans extends TileEntityMonitor implements SimpleCompone
 			lst.appendTag(new NBTTagString(t.toString()));
 		}
 		nbt.setTag("tablets", lst);
-		update = true;
+		// Never set update here: getDescriptionPacket calls writeToNBT, so re-arming from a
+		// save/desc write created an endless once-per-tick description-packet broadcast.
 	}
 	
 	@Override
