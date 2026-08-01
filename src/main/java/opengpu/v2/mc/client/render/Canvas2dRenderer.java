@@ -85,9 +85,8 @@ public final class Canvas2dRenderer {
 		// with real GL at every entry — never inherited from the previous scene's tail.
 		GL11.glDisable(GL11.GL_TEXTURE_2D);
 		texturing = false;
-
-		GL11.glClearColor(0f, 0f, 0f, 1f);
-		GL11.glClear(GL11.GL_COLOR_BUFFER_BIT);
+		// The framebuffer is cleared by FramebufferPass.begin(), which owns the ordering
+		// between the clear and the alpha mask that keeps the attachment opaque.
 
 		List<SceneNode> ordered = new ArrayList<SceneNode>(state.nodes.values());
 		Collections.sort(ordered, new Comparator<SceneNode>() {

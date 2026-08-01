@@ -225,7 +225,14 @@ public final class V2ServerRuntime {
 				}
 				continue;
 			}
-			double dist = distance(player, te);
+			// Distance to the nearest *surface* of this scene, not just the GPU: a screen
+			// on a far wall must keep its viewers subscribed even when the GPU is out of
+			// range (and the GUI viewer keeps the GPU itself relevant).
+			double dist = distance(player, te.xCoord, te.yCoord, te.zCoord);
+			int[] screen = te.boundScreenPosition();
+			if (screen != null) {
+				dist = Math.min(dist, distance(player, screen[0], screen[1], screen[2]));
+			}
 			if (!subscribed && dist <= SUBSCRIBE_RANGE) {
 				host.subscribe(uuid);
 			} else if (subscribed && dist > UNSUBSCRIBE_RANGE) {
@@ -234,11 +241,23 @@ public final class V2ServerRuntime {
 		}
 	}
 
-	private static double distance(EntityPlayer player, TileEntityGpu2 te) {
-		double dx = player.posX - (te.xCoord + 0.5);
-		double dy = player.posY - (te.yCoord + 0.5);
-		double dz = player.posZ - (te.zCoord + 0.5);
+	private static double distance(EntityPlayer player, int x, int y, int z) {
+		double dx = player.posX - (x + 0.5);
+		double dy = player.posY - (y + 0.5);
+		double dz = player.posZ - (z + 0.5);
 		return Math.sqrt(dx * dx + dy * dy + dz * dz);
+	}
+
+	/** A screen block was broken: tell whichever GPU was driving it. */
+	public void onScreenRemoved(TileEntityScreen2 screen) {
+		String driver = screen.driverAddress();
+		if (driver == null || screen.node() == null || screen.node().address() == null) {
+			return;
+		}
+		String screenAddress = screen.node().address();
+		for (TileEntityGpu2 te : hostsByScene.values()) {
+			te.onScreenRemoved(screenAddress);
+		}
 	}
 
 	/**

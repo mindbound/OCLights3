@@ -32,6 +32,7 @@ public final class FramebufferPass {
 	private final IntBuffer viewport = BufferUtils.createIntBuffer(16);
 
 	private final java.nio.FloatBuffer colorBuffer = BufferUtils.createFloatBuffer(16);
+	private final java.nio.ByteBuffer writeMaskBuffer = BufferUtils.createByteBuffer(16);
 
 	private int savedFbo;
 	private int savedViewportX, savedViewportY, savedViewportW, savedViewportH;
@@ -40,6 +41,8 @@ public final class FramebufferPass {
 	private int savedBlendSrcAlpha, savedBlendDstAlpha;
 	private float savedLineWidth;
 	private float savedColorR, savedColorG, savedColorB, savedColorA;
+	private boolean savedMaskR, savedMaskG, savedMaskB, savedMaskA;
+	private float savedClearR, savedClearG, savedClearB, savedClearA;
 	private boolean savedAlphaTest;
 	private boolean savedDepthTest;
 	private boolean savedDepthMask;
@@ -79,6 +82,18 @@ public final class FramebufferPass {
 		savedBlendSrcAlpha = GL11.glGetInteger(GL_BLEND_SRC_ALPHA);
 		savedBlendDstAlpha = GL11.glGetInteger(GL_BLEND_DST_ALPHA);
 		savedLineWidth = GL11.glGetFloat(GL11.GL_LINE_WIDTH);
+		colorBuffer.clear();
+		GL11.glGetFloat(GL11.GL_COLOR_CLEAR_VALUE, colorBuffer);
+		savedClearR = colorBuffer.get(0);
+		savedClearG = colorBuffer.get(1);
+		savedClearB = colorBuffer.get(2);
+		savedClearA = colorBuffer.get(3);
+		writeMaskBuffer.clear();
+		GL11.glGetBoolean(GL11.GL_COLOR_WRITEMASK, writeMaskBuffer);
+		savedMaskR = writeMaskBuffer.get(0) != 0;
+		savedMaskG = writeMaskBuffer.get(1) != 0;
+		savedMaskB = writeMaskBuffer.get(2) != 0;
+		savedMaskA = writeMaskBuffer.get(3) != 0;
 		colorBuffer.clear();
 		GL11.glGetFloat(GL11.GL_CURRENT_COLOR, colorBuffer);
 		savedColorR = colorBuffer.get(0);
@@ -120,6 +135,18 @@ public final class FramebufferPass {
 		GL11.glBlendFunc(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA);
 		// Canvas outlines are 1px; the world's block-highlight pass leaves this at 2.
 		GL11.glLineWidth(1.0F);
+		// Clear FIRST, with every channel writable — glClear obeys the colour mask, so
+		// masking alpha before this point leaves the attachment's alpha at its undefined
+		// (in practice zero) initial contents and the whole scene reads as transparent.
+		GL11.glColorMask(true, true, true, true);
+		GL11.glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
+		GL11.glClear(GL11.GL_COLOR_BUFFER_BIT);
+		// NOW pin alpha at the opaque value the clear just wrote: no recorded draw can
+		// lower it. Blending math is unaffected (it reads the *source* alpha), so
+		// translucent draws still composite correctly onto RGB. This is what lets surfaces
+		// draw the scene texture without touching GL_BLEND, which is unsafe mid-world
+		// under an Iris blend lock.
+		GL11.glColorMask(true, true, true, false);
 
 		// Matrices from scratch; the previous ones come back via the paired pops in end().
 		GL11.glMatrixMode(GL11.GL_PROJECTION);
@@ -153,6 +180,8 @@ public final class FramebufferPass {
 		OpenGlHelper.glBlendFunc(savedBlendSrc, savedBlendDst, savedBlendSrcAlpha, savedBlendDstAlpha);
 		GL11.glLineWidth(savedLineWidth);
 		GL11.glColor4f(savedColorR, savedColorG, savedColorB, savedColorA);
+		GL11.glColorMask(savedMaskR, savedMaskG, savedMaskB, savedMaskA);
+		GL11.glClearColor(savedClearR, savedClearG, savedClearB, savedClearA);
 		setEnabled(GL11.GL_ALPHA_TEST, savedAlphaTest);
 		setEnabled(GL11.GL_DEPTH_TEST, savedDepthTest);
 		GL11.glDepthMask(savedDepthMask);

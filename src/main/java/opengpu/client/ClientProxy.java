@@ -42,6 +42,8 @@ public class ClientProxy extends CommonProxy {
 
 		RenderingRegistry.registerBlockHandler(new TileEntityExternalMonitorRenderer());
 		ClientRegistry.bindTileEntitySpecialRenderer(TileEntityExternalMonitor.class, new TileEntityExternalMonitorRenderer());
+		ClientRegistry.bindTileEntitySpecialRenderer(opengpu.v2.mc.server.TileEntityScreen2.class,
+				new opengpu.v2.mc.client.render.ScreenRenderer());
 		MinecraftForgeClient.registerItemRenderer(OpenGPU.tablet, new TabletRenderer());
 		//ClientRegistry.bindTileEntitySpecialRenderer(TileEntityAdvancedlight.class, new TileEntityLightRenderer());
 

@@ -7,4 +7,5 @@ tile.Advanced.Light.name=Avansert Lys
 item.ram.name=Random Access Memory
 item.tablet.name=Tablet
 tile.gpu2.name=GPU (v2)
+tile.screen2.name=Skjerm (v2)
 itemGroup.OpenGPU=OpenGPU

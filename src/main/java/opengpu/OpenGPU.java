@@ -41,7 +41,7 @@ public class OpenGPU {
 	public static CommonProxy proxy;
 	
 	public static Block gpu,monitor,monitorBig,light,advancedlight,ttrans;
-	public static Block gpu2;
+	public static Block gpu2, screen2;
 	public static Item ram,tablet;
 	public static Logger logger;
 	

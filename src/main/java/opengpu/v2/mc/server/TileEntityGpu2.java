@@ -81,6 +81,17 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 	// Client-side mirror of the scene identity, from the description packet.
 	private String clientSceneId;
 
+	/** Address of the bound screen (persisted); resolved to a live TE each policy tick. */
+	private String boundScreenAddress;
+	private TileEntityScreen2 boundScreen;
+	/**
+	 * True once Lua has made an explicit binding decision (bind or unbind). Auto-bind is a
+	 * convenience for the un-configured build, so it keeps scanning until it succeeds or
+	 * until an explicit call settles the question — a scan that finds nothing must NOT
+	 * consume it, or a GPU placed before its screen can never auto-bind again.
+	 */
+	private boolean bindingIsExplicit;
+
 	/**
 	 * Set by any scene mutation, consumed once per tick in {@link #serverPump} to call
 	 * markDirty(). Callbacks must never touch the world directly — they run on OC executor
@@ -211,6 +222,11 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 	 */
 	public void onBlockDestroyed() {
 		synchronized (sceneLock) {
+			// Hand the screen back before this GPU disappears, so it is immediately
+			// bindable by another one and stops advertising a scene that is being deleted.
+			releaseBoundScreenLocked(null);
+			boundScreen = null;
+			boundScreenAddress = null;
 			if (host != null) {
 				host.destroy();
 			}
@@ -243,9 +259,159 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 				markDirty();
 			}
 			if (policyTick) {
+				resolveScreenLocked();
 				V2ServerRuntime.get().applyProximityPolicy(this, host);
 			}
 			host.tick(tick);
+		}
+	}
+
+	/**
+	 * Keep the bound screen reference live and its scene id current. Re-resolved on the
+	 * policy tick rather than cached forever: the screen's TE object is replaced on every
+	 * chunk reload, and the OC node graph is the only authority on where it went.
+	 */
+	private void resolveScreenLocked() {
+		if (boundScreenAddress == null && !bindingIsExplicit) {
+			autoBindAdjacentLocked();
+		}
+		if (boundScreenAddress == null) {
+			return;
+		}
+		if (node == null || node.network() == null) {
+			boundScreen = null;
+			return;
+		}
+		TileEntityScreen2 screen = screenAtLocked(boundScreenAddress);
+		if (screen == null && !bindingIsExplicit) {
+			// An auto binding is advisory, never a lock. If the address stopped resolving,
+			// drop it and re-scan: a screen broken while this GPU's chunk was unloaded
+			// never delivered onScreenRemoved, and would otherwise pin the GPU to a dead
+			// address forever with auto-bind gated off. The re-scan re-finds a merely
+			// unloaded neighbour (getTileEntity loads it), so a live binding survives.
+			boundScreenAddress = null;
+			autoBindAdjacentLocked();
+			screen = screenAtLocked(boundScreenAddress);
+			chunkDirty = true;
+		}
+		boundScreen = screen;
+		if (boundScreenAddress == null) {
+			return;
+		}
+		if (screen == null || screen.isInvalid()) {
+			return; // merely unloaded: keep the claim — reconcileDriver() agrees
+		}
+		String driver = screen.driverAddress();
+		if (driver != null && !driver.equals(node.address())
+				&& node.network().node(driver) != null) {
+			// Another LIVE GPU owns this screen: it took over while we were unloaded,
+			// which screenIsAvailable() deliberately permits. That rule is only sound if
+			// the displaced GPU yields — otherwise both re-push every policy tick and the
+			// screen thrashes between two scenes forever, and reconcileDriver() cannot
+			// arbitrate because whichever wrote last genuinely claims it. Drop our stale
+			// claim locally; never clearScene(), that would tear down the real owner's.
+			OpenGPU.logger.info("GPU " + node.address() + ": screen " + boundScreenAddress
+					+ " is now driven by " + driver + "; dropping the stale binding");
+			boundScreen = null;
+			boundScreenAddress = null;
+			chunkDirty = true;
+			return;
+		}
+		screen.bindScene(node.address(), scene.sceneId);
+	}
+
+	/**
+	 * Convenience default for the simple GPU-next-to-screen build. Deterministic: the six
+	 * neighbours are scanned in fixed order, so the same build always binds the same screen.
+	 */
+	private void autoBindAdjacentLocked() {
+		if (worldObj == null) {
+			return;
+		}
+		final int[][] offsets = { { 0, -1, 0 }, { 0, 1, 0 }, { 0, 0, -1 }, { 0, 0, 1 }, { -1, 0, 0 }, { 1, 0, 0 } };
+		for (int[] o : offsets) {
+			TileEntity te = worldObj.getTileEntity(xCoord + o[0], yCoord + o[1], zCoord + o[2]);
+			if (te instanceof TileEntityScreen2) {
+				TileEntityScreen2 screen = (TileEntityScreen2) te;
+				if (screen.node() != null && screen.node().address() != null
+						&& screenIsAvailable(screen)) {
+					boundScreenAddress = screen.node().address();
+					chunkDirty = true;
+					return;
+				}
+			}
+		}
+	}
+
+	/** Resolve a screen by node address, or null if it is not on our network right now. */
+	private TileEntityScreen2 screenAtLocked(String address) {
+		if (address == null || node == null || node.network() == null) {
+			return null;
+		}
+		Node found = node.network().node(address);
+		return found != null && found.host() instanceof TileEntityScreen2
+				? (TileEntityScreen2) found.host() : null;
+	}
+
+	/**
+	 * Release the currently bound screen's driver lock. Resolves by ADDRESS rather than
+	 * trusting the cached {@link #boundScreen}: that field is transient, is not restored
+	 * from NBT, and is nulled whenever the screen's chunk is unloaded — so releasing
+	 * through it silently leaks the lock exactly when the screen is not loaded, leaving a
+	 * screen no GPU can ever claim.
+	 */
+	private void releaseBoundScreenLocked(TileEntityScreen2 except) {
+		TileEntityScreen2 old = boundScreen != null ? boundScreen : screenAtLocked(boundScreenAddress);
+		if (old != null && old != except) {
+			old.clearScene(node != null ? node.address() : null);
+		}
+	}
+
+	/**
+	 * A screen is bindable when nothing drives it, we already drive it, or its recorded
+	 * driver is no longer on the network. Without that last case a GPU broken (or unloaded)
+	 * without unbinding would lock its screen out of every other GPU forever, and the
+	 * lockout would survive world reload.
+	 */
+	private boolean screenIsAvailable(TileEntityScreen2 screen) {
+		String driver = screen.driverAddress();
+		if (driver == null || (node != null && driver.equals(node.address()))) {
+			return true;
+		}
+		return node == null || node.network() == null || node.network().node(driver) == null;
+	}
+
+	/** The address this GPU believes it drives, for the screen's divergence check. */
+	public String boundScreenAddress() {
+		synchronized (sceneLock) {
+			return boundScreenAddress;
+		}
+	}
+
+	/** World position of the bound screen, or null — used by the subscription policy. */
+	public int[] boundScreenPosition() {
+		synchronized (sceneLock) {
+			TileEntityScreen2 screen = boundScreen;
+			if (screen == null || screen.isInvalid()) {
+				return null;
+			}
+			return new int[] { screen.xCoord, screen.yCoord, screen.zCoord };
+		}
+	}
+
+	/**
+	 * Called when a bound screen block is broken. Clears the ADDRESS too, not just the
+	 * cached instance: leaving it set pins the GPU to a dead address forever — auto-bind
+	 * stays suppressed (it only runs while unbound) and getScreen() keeps naming a screen
+	 * that no longer exists, so replacing the screen block in place never reconnects.
+	 */
+	public void onScreenRemoved(String screenAddress) {
+		synchronized (sceneLock) {
+			if (screenAddress != null && screenAddress.equals(boundScreenAddress)) {
+				boundScreen = null;
+				boundScreenAddress = null;
+				chunkDirty = true;
+			}
 		}
 	}
 
@@ -352,6 +518,12 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 	private void writeImplicitIds(NBTTagCompound tag) {
 		tag.setInteger("v2implicitRes", implicitCanvasRes);
 		tag.setInteger("v2implicitNode", implicitCanvasNode);
+		if (boundScreenAddress != null) {
+			tag.setString("v2screen", boundScreenAddress);
+		}
+		// An explicit bind/unbind is sticky across reloads; auto-bind keeps trying until
+		// then, so a screen placed after its GPU is still picked up.
+		tag.setBoolean("v2explicitBind", bindingIsExplicit);
 		// Presentation mode is sticky state (first present() switches the canvas to manual);
 		// losing it across a reload silently reverts a present()-mode program to append.
 		tag.setBoolean("v2autopresent", autopresent);
@@ -393,6 +565,8 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 		}
 		implicitCanvasRes = tag.getInteger("v2implicitRes");
 		implicitCanvasNode = tag.getInteger("v2implicitNode");
+		boundScreenAddress = tag.hasKey("v2screen") ? tag.getString("v2screen") : null;
+		bindingIsExplicit = tag.getBoolean("v2explicitBind");
 		// Absent key = fresh placement or a pre-v2 save: append mode is the documented default.
 		autopresent = !tag.hasKey("v2autopresent") || tag.getBoolean("v2autopresent");
 		pushDepth = Math.max(0, Math.min(PUSH_DEPTH_CAP, tag.getInteger("v2pushDepth")));
@@ -835,6 +1009,56 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 	@Callback(direct = true, doc = "function():number, number -- The canvas resolution in logical units.")
 	public Object[] getResolution(Context context, Arguments args) {
 		return new Object[] { DEFAULT_WIDTH, DEFAULT_HEIGHT };
+	}
+
+	// Screen binding. NOT direct: these walk the node network, which is not thread-safe off
+	// the server thread (OC's own gpu.bind is likewise non-direct).
+
+	@Callback(doc = "function(address:string) -- Bind this GPU's scene to a screen.")
+	public Object[] bind(Context context, Arguments args) throws Exception {
+		String address = args.checkString(0);
+		if (node == null || node.network() == null) {
+			throw new Exception("GPU is not connected to a network");
+		}
+		Node target = node.network().node(address);
+		if (target == null || !(target.host() instanceof TileEntityScreen2)) {
+			throw new Exception("no screen with address " + address);
+		}
+		TileEntityScreen2 screen = (TileEntityScreen2) target.host();
+		if (!screenIsAvailable(screen)) {
+			// One driving GPU per surface: the old scene keeps living on its own GPU.
+			throw new Exception("screen is already driven by GPU " + screen.driverAddress());
+		}
+		synchronized (sceneLock) {
+			releaseBoundScreenLocked(screen);
+			boundScreenAddress = address;
+			boundScreen = screen;
+			bindingIsExplicit = true;
+			chunkDirty = true;
+			if (scene != null) {
+				screen.bindScene(node.address(), scene.sceneId);
+			}
+		}
+		return new Object[] { true };
+	}
+
+	@Callback(doc = "function() -- Unbind the current screen; the scene stays on this GPU.")
+	public Object[] unbind(Context context, Arguments args) {
+		synchronized (sceneLock) {
+			releaseBoundScreenLocked(null);
+			boundScreen = null;
+			boundScreenAddress = null;
+			bindingIsExplicit = true; // an explicit unbind must not be undone by auto-bind
+			chunkDirty = true;
+		}
+		return null;
+	}
+
+	@Callback(direct = true, doc = "function():string -- Address of the bound screen, or nil.")
+	public Object[] getScreen(Context context, Arguments args) {
+		synchronized (sceneLock) {
+			return new Object[] { boundScreenAddress };
+		}
 	}
 
 	// Memory accounting

@@ -22,7 +22,9 @@ import opengpu.block.tileentity.TileEntityTTrans;
 import opengpu.item.ItemRAM;
 import opengpu.item.ItemTablet;
 import opengpu.v2.mc.server.BlockGpu2;
+import opengpu.v2.mc.server.BlockScreen2;
 import opengpu.v2.mc.server.TileEntityGpu2;
+import opengpu.v2.mc.server.TileEntityScreen2;
 
 public class CommonProxy {
 	public static int modelID;
@@ -82,6 +84,10 @@ public class CommonProxy {
 			OpenGPU.gpu2 = new BlockGpu2(Material.iron);
 			GameRegistry.registerBlock(OpenGPU.gpu2, "gpu_v2");
 			GameRegistry.registerTileEntity(TileEntityGpu2.class, Tags.MOD_ID + ":gpu_v2");
+
+			OpenGPU.screen2 = new BlockScreen2(Material.iron);
+			GameRegistry.registerBlock(OpenGPU.screen2, "screen_v2");
+			GameRegistry.registerTileEntity(TileEntityScreen2.class, Tags.MOD_ID + ":screen_v2");
 
 			OpenGPU.ram = new ItemRAM();
 			
