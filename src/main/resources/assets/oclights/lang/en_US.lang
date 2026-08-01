@@ -6,4 +6,5 @@ tile.Light.name=Light
 tile.Advanced.Light.name=Advanced Light
 item.ram.name=Random Access Memory
 item.tablet.name=Tablet
+tile.gpu2.name=GPU (v2)
 itemGroup.OpenGPU=OpenGPU

@@ -31,6 +31,11 @@ public class ClientProxy extends CommonProxy {
 	}
 
 	@Override
+	public void initV2Client() {
+		opengpu.v2.mc.client.V2ClientRuntime.init();
+	}
+
+	@Override
 	public void registerRenderInfo()
 	{
 		CommonProxy.modelID = RenderingRegistry.getNextAvailableRenderId();

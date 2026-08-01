@@ -180,5 +180,10 @@ public final class FrameChunker {
 		public void evict(String senderKey) {
 			senders.remove(senderKey);
 		}
+
+		/** Drops every sender's state (server stop / world unload on a long-lived instance). */
+		public void clear() {
+			senders.clear();
+		}
 	}
 }

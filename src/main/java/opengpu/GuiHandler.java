@@ -8,8 +8,12 @@ import cpw.mods.fml.common.network.IGuiHandler;
 import opengpu.block.tileentity.TileEntityMonitor;
 import opengpu.client.gui.GuiMonitor;
 import opengpu.client.gui.GuiTablet;
+import opengpu.v2.mc.client.GuiScene;
+import opengpu.v2.mc.server.TileEntityGpu2;
 
 public class GuiHandler implements IGuiHandler {
+
+	public static final int GUI_SCENE_VIEWER = 2;
 
 	@Override
 	public Object getServerGuiElement(int ID, EntityPlayer player, World world, int x, int y, int z) {
@@ -35,6 +39,13 @@ public class GuiHandler implements IGuiHandler {
 				return null;
 			}
 			return new GuiTablet(held.getTagCompound(), world);
+		}
+		case GUI_SCENE_VIEWER: {
+			TileEntity te = world.getTileEntity(x, y, z);
+			if (te instanceof TileEntityGpu2) {
+				return new GuiScene((TileEntityGpu2) te);
+			}
+			return null;
 		}
 		}
 		return null;

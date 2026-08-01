@@ -18,12 +18,15 @@ import cpw.mods.fml.common.SidedProxy;
 import cpw.mods.fml.common.event.FMLMissingMappingsEvent;
 import cpw.mods.fml.common.event.FMLPostInitializationEvent;
 import cpw.mods.fml.common.event.FMLPreInitializationEvent;
+import cpw.mods.fml.common.event.FMLServerStoppedEvent;
 import cpw.mods.fml.common.network.NetworkRegistry;
 import cpw.mods.fml.common.registry.GameRegistry;
 import cpw.mods.fml.common.network.simpleimpl.SimpleNetworkWrapper;
 import cpw.mods.fml.relauncher.Side;
 import opengpu.network.PacketHandler;
 import opengpu.network.PacketHandler.PacketMessage;
+import opengpu.v2.mc.net.V2Net;
+import opengpu.v2.mc.server.V2ServerRuntime;
 
 @Mod(modid = Tags.MOD_ID,
      name = Tags.MOD_NAME,
@@ -38,6 +41,7 @@ public class OpenGPU {
 	public static CommonProxy proxy;
 	
 	public static Block gpu,monitor,monitorBig,light,advancedlight,ttrans;
+	public static Block gpu2;
 	public static Item ram,tablet;
 	public static Logger logger;
 	
@@ -63,8 +67,17 @@ public class OpenGPU {
 		Config.loadConfig(new Configuration(migrateLegacyConfig(event)));
 		
 		proxy.registerBlocks();
-        
+
+		V2Net.init();
+		V2ServerRuntime.init();
+		proxy.initV2Client();
+
 		logger.log(Level.INFO, "STANDING BY");
+	}
+
+	@Mod.EventHandler
+	public void serverStopped(FMLServerStoppedEvent event) {
+		V2ServerRuntime.get().onServerStopped();
 	}
 
 	/**

@@ -21,11 +21,16 @@ import opengpu.block.tileentity.TileEntityMonitor;
 import opengpu.block.tileentity.TileEntityTTrans;
 import opengpu.item.ItemRAM;
 import opengpu.item.ItemTablet;
+import opengpu.v2.mc.server.BlockGpu2;
+import opengpu.v2.mc.server.TileEntityGpu2;
 
 public class CommonProxy {
 	public static int modelID;
 	
 	public  void registerRenderInfo(){};
+
+	/** Client-side v2 runtime bootstrap; no-op on the dedicated server. */
+	public void initV2Client() {}
 	
 	public void registerBlocks()
 	{	
@@ -66,11 +71,17 @@ public class CommonProxy {
 		*/
 			
 			OpenGPU.ttrans = new BlockTabletTransceiver(Material.iron);
-			
+
 			GameRegistry.registerBlock(OpenGPU.ttrans, "OCLTTrans");
 			GameRegistry.registerTileEntityWithAlternatives(TileEntityTTrans.class, Tags.MOD_ID + ":tablet_transceiver", "OCLTTransTE", "OCLights3:tablet_transceiver");
-			
+
 			ttrans = true;
+
+			// v2 GPU (Stage A): new block, new TE — coexists with the legacy GPU during
+			// the transition; the legacy block set dies at the Stage A cut-over.
+			OpenGPU.gpu2 = new BlockGpu2(Material.iron);
+			GameRegistry.registerBlock(OpenGPU.gpu2, "gpu_v2");
+			GameRegistry.registerTileEntity(TileEntityGpu2.class, Tags.MOD_ID + ":gpu_v2");
 
 			OpenGPU.ram = new ItemRAM();
 			
