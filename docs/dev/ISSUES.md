@@ -1,4 +1,4 @@
-# OCLights3 — Verified Issues Register
+# OpenGPU — Verified Issues Register
 
 Every entry below was found by a code survey and then **adversarially re-verified against the code**
 by an independent audit pass (2026-07-31, tree `24c4ba1`). Verification is by reading (plus a few
@@ -272,7 +272,10 @@ IDs are stable — reference them in commits (e.g. `Fix G-01`).
   `OCLTTransTE`) — which also cures the bare-`GPU` collision hazard. Residual: Java package stays
   `ds.mods.OCLights2` for now (rename = separate refactor decision); old `OCLights2.cfg` config
   values are not migrated (config is nearly dead, U-06); disabled light blocks from pre-2015
-  worlds are intentionally not remapped.
+  worlds are intentionally not remapped. **Superseded 2026-08-01**: final identity is `OpenGPU` —
+  package renamed to `opengpu.*`, the remap now also accepts interim `OCLights3:*` ids, and
+  preInit copies the newest legacy config (`OCLights3.cfg`/`OCLights2.cfg`) into `OpenGPU.cfg`
+  on first launch, resolving both residuals (see ROADMAP Phase 0).
 - **B-03 (L)** — Modrinth/CurseForge tokens are forwarded by CI but no corresponding publish
   config exists in the buildscript; ~~`mcmod.info` declares empty `dependencies`~~ (fixed
   2026-07-31).

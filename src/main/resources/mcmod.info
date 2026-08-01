@@ -2,7 +2,7 @@
   {
     "modid": "${modId}",
     "name": "${modName}",
-    "description": "OCLights 3 adds GPU-driven pixel-graphics monitors and tablets for OpenComputers.",
+    "description": "OpenGPU adds GPU-driven pixel-graphics monitors and tablets for OpenComputers.",
     "version": "${modVersion}",
     "mcversion": "${minecraftVersion}",
     "url": "https://github.com/mindbound/OCLights3",
@@ -12,7 +12,7 @@
       "Alekso56",
       "gamax92"
     ],
-    "credits": "OCLights3 revival fork; based on OCLights2 / CCLights2 by ds84182 et al.",
+    "credits": "OpenGPU revival fork (formerly OCLights3); based on OCLights2 / CCLights2 by ds84182 et al.",
     "logoFile": "assets/oclights/textures/items/ram.png",
     "screenshots": [],
     "dependencies": ["OpenComputers"]

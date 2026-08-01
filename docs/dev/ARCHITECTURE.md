@@ -1,4 +1,4 @@
-# OCLights3 — Architecture / Codebase Map
+# OpenGPU — Architecture / Codebase Map
 
 State of the codebase as inherited (basdxz OCLights2 fork tip, commit `24c4ba1`). Written from a
 full-code survey (2026-07-31); all file:line references are against that tree. Defects discovered
@@ -37,14 +37,14 @@ enter the drawlist — they read server state directly in the callback.
 
 | Package / path | Role |
 |---|---|
-| `ds.mods.OCLights2` | Mod entry (`OCLights2.java`), `CommonProxy` (registration), `Config`, `GuiHandler`, `CommandEnum` (wire opcodes), `ClientDrawThread` |
-| `ds.mods.OCLights2.gpu` | Core: `GPU` (command interpreter + state), `Texture` (java.awt rasterizer), `Monitor`, `DrawCMD` |
-| `ds.mods.OCLights2.block` (+`.tileentity`) | Blocks: GPU, Monitor, ExternalMonitor (multiblock), TabletTransceiver, 2 disabled lights; TEs incl. `TileEntityGPU` (the OC component) |
-| `ds.mods.OCLights2.network` | `PacketHandler(IMPL)`, `PacketSenders`, `PacketChunker` (gzip+split) |
-| `ds.mods.OCLights2.serialize` | Type-tagged value codec for DrawCMD args on the wire |
-| `ds.mods.OCLights2.converter`, `.utils` | Lua-value coercion helpers, color-depth math, `TabMesg` tablet bus |
-| `ds.mods.OCLights2.client` | Proxies, GUIs (`GuiMonitor`, `GuiTablet`), renderers (TESR, `TabletRenderer`), `ClientTickHandler` (screenshot hook) |
-| `ds.mods.OCLights2.jhlabs.image` | 12 bundled Huxtable filters; **only `BoxBlurFilter` is used** (Blur opcode, radius 2) |
+| `opengpu` | Mod entry (`OpenGPU.java`), `CommonProxy` (registration), `Config`, `GuiHandler`, `CommandEnum` (wire opcodes), `ClientDrawThread` |
+| `opengpu.gpu` | Core: `GPU` (command interpreter + state), `Texture` (java.awt rasterizer), `Monitor`, `DrawCMD` |
+| `opengpu.block` (+`.tileentity`) | Blocks: GPU, Monitor, ExternalMonitor (multiblock), TabletTransceiver, 2 disabled lights; TEs incl. `TileEntityGPU` (the OC component) |
+| `opengpu.network` | `PacketHandler(IMPL)`, `PacketSenders`, `PacketChunker` (gzip+split) |
+| `opengpu.serialize` | Type-tagged value codec for DrawCMD args on the wire |
+| `opengpu.converter`, `.utils` | Lua-value coercion helpers, color-depth math, `TabMesg` tablet bus |
+| `opengpu.client` | Proxies, GUIs (`GuiMonitor`, `GuiTablet`), renderers (TESR, `TabletRenderer`), `ClientTickHandler` (screenshot hook) |
+| `opengpu.jhlabs.image` | 12 bundled Huxtable filters; **only `BoxBlurFilter` is used** (Blur opcode, radius 2) |
 | `src/main/resources/assets/oclights` | Textures, lang (en_US, nb_NO), shipped Lua (`lib/gpu.lua`, `bin/gpututorial.lua`, `bin/tabletcam.lua`, `.autorun.lua`) |
 
 ## GPU core
@@ -208,7 +208,7 @@ tutorial), `bin/tabletcam.lua` (**broken** — ComputerCraft-era `peripheral.wra
 
 FPGradle (`com.falsepattern.fpgradle-mc` 3.3.0), Gradle 9.2.1 wrapper, JDK auto-provisioned via
 foojay (Gradle itself needs JVM 17+; compiled output targets MC 1.7.10/Java 8). `Tags` class is
-generated at build time into `ds.mods.OCLights2` (tokenClass config) — no `Tags.java` in tree, by
+generated at build time into `opengpu` (tokenClass config) — no `Tags.java` in tree, by
 design. Dependency: `com.github.GTNewHorizons:OpenComputers:1.12.8-GTNH` (`:api` compileOnly,
 `:dev` runtimeOnly). CI: two thin workflows delegating to `FalsePattern/fpgradle-workflows@master`;
 release fires on tag push (no tags exist yet; no version is defined anywhere — ISSUES B-02).

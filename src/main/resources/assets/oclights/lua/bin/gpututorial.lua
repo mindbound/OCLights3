@@ -98,7 +98,7 @@ local examples = {
 	end},
 	{"Textures",
 	function()
-		fadeNext("In OCLights2, you can use")
+		fadeNext("In OpenGPU, you can use")
 		fadeNext("gpu.createTexture(width,height)")
 		fadeNext("to create textures.")
 		fadeNext("The above method will return a number")
@@ -118,7 +118,7 @@ local examples = {
 		event.pull("monitor_up")
 		fadeScreen()
 		
-		fadeNext("Because OCLights2 has limited texture memory,")
+		fadeNext("Because OpenGPU has limited texture memory,")
 		fadeNext("you can free textures.")
 		fadeNext("gpu.freeTexture(id)")
 		fadeNext("Given an id, the above will free that texture")
@@ -126,7 +126,7 @@ local examples = {
 		event.pull("monitor_up")
 		fadeScreen()
 		
-		fadeNext("In OCLights2, the screen texture has an id of 0")
+		fadeNext("In OpenGPU, the screen texture has an id of 0")
 		fadeNext("You can use the screen like a texture")
 		fadeNext("gpu.drawTexture(0,64,64)")
 		os.sleep(0.5)
@@ -137,7 +137,7 @@ local examples = {
 		event.pull("monitor_up")
 		fadeScreen()
 		
-		fadeNext("Textures in OCLights2 are framebuffers")
+		fadeNext("Textures in OpenGPU are framebuffers")
 		fadeNext("This means that you can draw to them")
 		fadeNext("gpu.bindTexture(id) allows you to do that")
 		fadeNext("gpu.bindTexture(0) will draw to the screen")
@@ -255,7 +255,7 @@ local s,e = pcall(function()
 		gpu.setColor(255,255,255)
 		gpu.fill()
 
-		fadeDouble("OCLights2 Tutorial",0,0)
+		fadeDouble("OpenGPU Tutorial",0,0)
 		fade("Click to continue",0,16)
 		local exm = "Click me for the examples menu"
 		fade(exm,0,24)
@@ -341,7 +341,7 @@ local s,e = pcall(function()
 				runExample(i)
 			end
 			
-			fade("You are finished with the OCLights2 tutorial!")
+			fade("You are finished with the OpenGPU tutorial!")
 			fade("Click to continue",0,8)
 			event.pull("monitor_up")
 			fadeScreen()

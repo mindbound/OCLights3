@@ -1,8 +1,8 @@
-# OCLights3 — Project Charter
+# OpenGPU — Project Charter
 
 ## What this is
 
-OCLights3 is a revival fork of **OCLights2**, an abandoned Minecraft 1.7.10 mod that adds a
+OpenGPU (formerly OCLights3) is a revival fork of **OCLights2**, an abandoned Minecraft 1.7.10 mod that adds a
 **GPU peripheral for OpenComputers**: a component that renders pixel-graphics draw commands to
 monitors, in contrast to OpenComputers' built-in character-cell screens.
 
@@ -13,9 +13,9 @@ monitors, in contrast to OpenComputers' built-in character-cell screens.
 | [CCLights2](https://github.com/ds84182/CCLights2) | ds84182 | ComputerCraft | abandoned |
 | OCLights2 | ds84182 et al. | OpenComputers port | abandoned |
 | [OCLights2 (basdxz fork)](https://github.com/basdxz/OCLights2) | basdxz | GTNH OpenComputers + FPGradle build | starting point — this repo's history |
-| **OCLights3** | this project | GTNH OpenComputers | active |
+| **OpenGPU** | this project (interim name OCLights3) | GTNH OpenComputers | active |
 
-The repo currently *is* the basdxz OCLights2 fork; OCLights3 work happens on top of it.
+The repo currently *is* the basdxz OCLights2 fork; OpenGPU work happens on top of it.
 
 ## Upstream / reference repos
 
@@ -48,7 +48,10 @@ Explicitly *not* a priority right now: brand-new OC components/blocks. Possible 
 1. ~~**Identity**~~ — DECIDED 2026-07-31: renamed to modid `OCLights3`, with save compat preserved
    via `FMLMissingMappingsEvent` remapping (blocks/items) and
    `registerTileEntityWithAlternatives` (TE ids, also fixing the bare `GPU` id hazard).
-2. **Licensing/provenance** — DEFERRED while OCLights3 is private/internal-use (redistribution
+   **Superseded 2026-08-01**: final identity is `OpenGPU` (modid `OpenGPU`, package root
+   `opengpu.*`); the remap accepts both `OCLights2:*` and interim `OCLights3:*` ids, and legacy
+   configs are migrated on first launch.
+2. **Licensing/provenance** — DEFERRED while the project is private/internal-use (redistribution
    obligations don't attach). **Publish gate**: before any public release, run the licensing
    checklist in ROADMAP Phase 0 (jhlabs prune + Apache-2.0 attribution; `ascii.png` provenance
    check/replacement). Repo license stays MMPL-1.0.
@@ -61,6 +64,9 @@ Explicitly *not* a priority right now: brand-new OC components/blocks. Possible 
   `D:\Minecraft\java`; see ISSUES B-04).
 - 2026-07-31 — modid renamed `OCLights2` → `OCLights3` (with world remapping), OC dependency
   bumped `1.12.8-GTNH` → `1.12.55-GTNH`, stale URLs/README/mcmod.info refreshed.
+- 2026-08-01 — final identity settled: `OCLights3` → `OpenGPU` (modid `OpenGPU`, package root
+  `opengpu.*` — legacy at `opengpu.`, new core at `opengpu.v2.`; rootProject `OpenGPU`); remap
+  accepts both legacy id domains; legacy config migrated on first launch.
 
 ## Work docs
 

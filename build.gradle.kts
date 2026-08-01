@@ -2,13 +2,13 @@ plugins {
     id("com.falsepattern.fpgradle-mc") version "3.3.0"
 }
 
-group = "ds.mods"
+group = "opengpu"
 
 minecraft_fp {
     mod {
-        modid   = "OCLights3"
-        name    = "OCLights 3"
-        rootPkg = "$group.OCLights2"
+        modid   = "OpenGPU"
+        name    = "OpenGPU"
+        rootPkg = "opengpu"
     }
 
     tokens {

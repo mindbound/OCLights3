@@ -1,4 +1,4 @@
-# OCLights3 — Roadmap
+# OpenGPU — Roadmap
 
 Phases are ordered by the project priorities (fix → performance → completeness → API extension),
 but Phase 0 comes first because identity/licensing decisions gate what the fixes may break, and a
@@ -11,6 +11,13 @@ few Phase-1 items (the protocol redesign) naturally merge into Phase 2. Issue ID
 
 1. ~~**Mod identity**~~ — DONE 2026-07-31: renamed to `OCLights3` with full save compat
    (missing-mappings remap + TE alternatives; details in ISSUES B-02).
+   **Superseded 2026-08-01: final identity is `OpenGPU`** (modid `OpenGPU`, display name
+   "OpenGPU", Java package root `opengpu.*` — legacy code at `opengpu.`, new core at
+   `opengpu.v2.` until the old code is deleted). The remap now accepts both `OCLights2:*`
+   and interim `OCLights3:*` ids; TE registrations carry `OCLights3:*` alternatives.
+   Decided while no world had ever seen OCLights3 ids, so the rename costs nothing in
+   save compat. Asset domain stays `oclights` (legacy assets die at Stage A). Repo
+   directory/GitHub name still say OCLights3 — renaming those is the user's call.
 2. **Licensing / asset provenance** — DEFERRED 2026-07-31: OCLights3 is private/internal-use for
    now, and these are *redistribution* obligations, so nothing is required yet. **This is a hard
    publish gate**: before publishing jars or the repo anywhere (including a multiplayer server

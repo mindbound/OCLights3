@@ -1,4 +1,4 @@
-# OCLights3 — OpenComputers Integration & API Notes
+# OpenGPU — OpenComputers Integration & API Notes
 
 How the mod integrates with OpenComputers today, the full Lua-facing API as shipped, and what the
 GTNH OC API expects from a well-behaved component mod (with OC's own screen sync documented as

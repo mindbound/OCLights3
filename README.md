@@ -1,6 +1,6 @@
-# OCLights 3
+# OpenGPU
 
-OCLights 3 is an open-source Minecraft 1.7.10 mod that adds a **GPU peripheral for
+OpenGPU is an open-source Minecraft 1.7.10 mod that adds a **GPU peripheral for
 [OpenComputers](https://github.com/GTNewHorizons/OpenComputers)**: pixel-graphics rendering to
 dedicated monitors, multi-block external monitors, and remote tablets — in contrast to OC's
 built-in character-cell screens.
@@ -24,3 +24,8 @@ are provisioned automatically):
 ## License
 
 [MMPL-1.0](LICENSE.md), continued from CCLights2/OCLights2.
+
+## Naming
+
+Earlier revival commits used the working name **OCLights3** before the project settled on
+OpenGPU; saves from that interim modid are remapped automatically, same as OCLights2 worlds.

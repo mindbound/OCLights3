@@ -9,7 +9,7 @@ function gpu.importFile(path)
 	checkArg(1, path, "string")
 
 	if not component.isAvailable("ocl_gpu") then
-		error("no OCLights2 GPU found", 2)
+		error("no OpenGPU GPU found", 2)
 	end
 
 	path = fs.canonical("/" .. path)
@@ -25,7 +25,7 @@ end
 setmetatable(gpu, {
 __index = function(_, key)
 	if not component.isAvailable("ocl_gpu") then
-		error("no OCLights2 GPU found", 2)
+		error("no OpenGPU GPU found", 2)
 	end
 	return component.ocl_gpu[key]
 end})
