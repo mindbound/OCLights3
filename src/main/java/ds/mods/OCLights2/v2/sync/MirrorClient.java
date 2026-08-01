@@ -107,7 +107,11 @@ public final class MirrorClient {
 		switch (kind) {
 			case MessageCodec.MSG_BATCH: {
 				SceneBatch batch = BatchCodec.decode(payload);
-				if (mirror(batch.sceneId).applyBatch(batch)) {
+				SceneMirror mirror = mirror(batch.sceneId);
+				int epochBefore = mirror.knownEpoch();
+				boolean clean = mirror.applyBatch(batch);
+				noteEpochTransition(batch.sceneId, epochBefore, mirror);
+				if (clean) {
 					noteProgress(batch.sceneId);
 				}
 				break;
@@ -115,7 +119,9 @@ public final class MirrorClient {
 			case MessageCodec.MSG_SNAPSHOT: {
 				SceneSnapshot snapshot = SnapshotCodec.decode(payload);
 				SceneMirror mirror = mirror(snapshot.sceneId);
+				int epochBefore = mirror.knownEpoch();
 				mirror.applySnapshot(snapshot);
+				noteEpochTransition(snapshot.sceneId, epochBefore, mirror);
 				if (!mirror.needsResync()) {
 					noteProgress(snapshot.sceneId);
 				}
@@ -123,7 +129,10 @@ public final class MirrorClient {
 			}
 			case MessageCodec.MSG_HEARTBEAT: {
 				MessageCodec.Heartbeat hb = MessageCodec.decodeHeartbeat(payload);
-				mirror(hb.sceneId).observeSeq(hb.seq);
+				SceneMirror mirror = mirror(hb.sceneId);
+				int epochBefore = mirror.knownEpoch();
+				mirror.observeSeq(hb.epoch, hb.seq);
+				noteEpochTransition(hb.sceneId, epochBefore, mirror);
 				break;
 			}
 			case MessageCodec.MSG_RESOURCE_BODY: {
@@ -213,6 +222,20 @@ public final class MirrorClient {
 	private void noteProgress(String sceneId) {
 		lastResyncRequest.remove(sceneId);
 		resyncAttempts.remove(sceneId);
+	}
+
+	/**
+	 * An incarnation change resets the mirror, so retry state accrued against the dead
+	 * incarnation must not carry over: attempts charged to a scene that "never answered"
+	 * would wrongly evict a scene that just proved it is alive, and per-resource request
+	 * stamps collide with the new incarnation's reallocated ids.
+	 */
+	private void noteEpochTransition(String sceneId, int epochBefore, SceneMirror mirror) {
+		if (epochBefore != mirror.knownEpoch()) {
+			lastResyncRequest.remove(sceneId);
+			resyncAttempts.remove(sceneId);
+			lastResourceRequest.remove(sceneId);
+		}
 	}
 
 	private void pruneResourceStamp(String sceneId, int resId) {

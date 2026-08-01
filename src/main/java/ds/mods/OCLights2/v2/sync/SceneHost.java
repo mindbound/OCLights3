@@ -123,6 +123,28 @@ public final class SceneHost {
 		return destroyed;
 	}
 
+	/**
+	 * Save-boundary helper: seal the pending batch and broadcast it, so persistence can
+	 * encode at a true batch boundary WITHOUT desyncing watchers. Call under the scene lock
+	 * immediately before ScenePersistence.encodeStructure. The extra mid-tick batch is a
+	 * sanctioned exception to one-batch-per-tick (rare, small, and mirrors handle
+	 * consecutive seqs within a tick fine). Never seal-and-discard instead: staged deltas
+	 * are already applied to server state, so discarding the batch silently desyncs every
+	 * mirror with perfect seq continuity.
+	 */
+	public void saveBoundary() {
+		SceneBatch batch = scene.sealBatch();
+		if (batch != null) {
+			if (!watchers.isEmpty()) {
+				byte[] envelope = MessageCodec.envelope(MessageCodec.MSG_BATCH, BatchCodec.encode(batch));
+				for (String watcher : watchers) {
+					transport.sendToWatcher(watcher, envelope);
+				}
+			}
+			idleTicks = 0;
+		}
+	}
+
 	/** Called once per server tick, after the component layer's mutations, under the scene lock. */
 	public void tick(long currentTick) {
 		lastTick = currentTick;
@@ -232,7 +254,7 @@ public final class SceneHost {
 
 	private byte[] heartbeatEnvelope() {
 		byte[] payload = MessageCodec.encodeHeartbeat(
-				new MessageCodec.Heartbeat(scene.sceneId, scene.currentSeq()));
+				new MessageCodec.Heartbeat(scene.sceneId, scene.epoch(), scene.currentSeq()));
 		return MessageCodec.envelope(MessageCodec.MSG_HEARTBEAT, payload);
 	}
 

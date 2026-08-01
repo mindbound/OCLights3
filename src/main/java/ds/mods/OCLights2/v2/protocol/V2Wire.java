@@ -9,7 +9,9 @@ package ds.mods.OCLights2.v2.protocol;
 public final class V2Wire {
 	private V2Wire() {}
 
-	public static final short PROTOCOL_VERSION = 1;
+	// v2: scene incarnation epoch inserted into batch/snapshot/heartbeat headers.
+	// Discipline: any layout change bumps this in the same change.
+	public static final short PROTOCOL_VERSION = 2;
 
 	// Delta type ids
 	public static final byte DELTA_NODE_CREATE = 1;

@@ -393,7 +393,7 @@ public class SyncLoopbackTest {
 		}, RESYNC_RETRY, 3, 8);
 		// A straggler heartbeat resurrects a mirror nobody will ever answer.
 		byte[] heartbeat = MessageCodec.envelope(MessageCodec.MSG_HEARTBEAT,
-				MessageCodec.encodeHeartbeat(new MessageCodec.Heartbeat("ghost", 42)));
+				MessageCodec.encodeHeartbeat(new MessageCodec.Heartbeat("ghost", 5, 42)));
 		client.onMessage(heartbeat);
 		assertTrue(client.hasMirror("ghost"));
 		for (long t = 1; t <= 40; t++) {

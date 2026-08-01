@@ -35,10 +35,12 @@ public final class MessageCodec {
 
 	public static final class Heartbeat {
 		public final String sceneId;
+		public final int epoch;
 		public final int seq;
 
-		public Heartbeat(String sceneId, int seq) {
+		public Heartbeat(String sceneId, int epoch, int seq) {
 			this.sceneId = sceneId;
+			this.epoch = epoch;
 			this.seq = seq;
 		}
 	}
@@ -107,6 +109,7 @@ public final class MessageCodec {
 		try {
 			out.writeShort(V2Wire.PROTOCOL_VERSION);
 			out.writeUTF(hb.sceneId);
+			out.writeInt(hb.epoch);
 			out.writeInt(hb.seq);
 		} catch (IOException e) {
 			throw new RuntimeException(e);
@@ -117,7 +120,11 @@ public final class MessageCodec {
 	public static Heartbeat decodeHeartbeat(byte[] data) throws CodecException {
 		DataInputStream in = open(data);
 		try {
-			Heartbeat hb = new Heartbeat(in.readUTF(), in.readInt());
+			String sceneId = in.readUTF();
+			int epoch = in.readInt();
+			if (epoch == 0)
+				throw new CodecException("Epoch 0 is reserved");
+			Heartbeat hb = new Heartbeat(sceneId, epoch, in.readInt());
 			expectEnd(in);
 			return hb;
 		} catch (IOException e) {

@@ -40,7 +40,7 @@ public class BatchCodecTest {
 		deltas.add(new Delta.NodeFree(2));
 		deltas.add(new Delta.ResourceFree(2));
 		deltas.add(new Delta.SceneProp(7, new byte[] { 1, 2, 3 }));
-		return new SceneBatch("aaaa-bbbb-cccc-dddd", 41, 123456789L, deltas);
+		return new SceneBatch("aaaa-bbbb-cccc-dddd", 5, 41, 123456789L, deltas);
 	}
 
 	@Test
@@ -48,6 +48,7 @@ public class BatchCodecTest {
 		SceneBatch batch = sampleBatch();
 		SceneBatch decoded = BatchCodec.decode(BatchCodec.encode(batch));
 		assertEquals(batch, decoded);
+		assertEquals(5, decoded.epoch);
 		assertEquals(41, decoded.seq);
 		assertEquals(123456789L, decoded.serverTick);
 	}
@@ -81,8 +82,8 @@ public class BatchCodecTest {
 	public void rejectsGarbageWithoutHugeAllocation() {
 		byte[] data = BatchCodec.encode(sampleBatch());
 		// Corrupt the delta count to a huge value; decode must throw, not OOM.
-		// Header: short version + UTF(sceneId: 2 len + 19 bytes) + int seq + long tick = 35 bytes in.
-		int countOffset = 2 + 2 + 19 + 4 + 8;
+		// Header: short version + UTF(2+19) + int epoch + int seq + long tick = 39 bytes in.
+		int countOffset = 2 + 2 + 19 + 4 + 4 + 8;
 		data[countOffset] = (byte) 0x7F;
 		try {
 			BatchCodec.decode(data);
@@ -95,9 +96,9 @@ public class BatchCodecTest {
 	public void rejectsUnknownDeltaType() throws Exception {
 		ArrayList<Delta> deltas = new ArrayList<Delta>();
 		deltas.add(new Delta.NodeFree(1));
-		byte[] data = BatchCodec.encode(new SceneBatch("s", 1, 0L, deltas));
-		// Find the delta type byte: header is short + UTF("s": 2+1) + int + long + int count.
-		int typeOffset = 2 + 3 + 4 + 8 + 4;
+		byte[] data = BatchCodec.encode(new SceneBatch("s", 3, 1, 0L, deltas));
+		// Delta type byte: short + UTF("s": 2+1) + int epoch + int seq + long tick + int count.
+		int typeOffset = 2 + 3 + 4 + 4 + 8 + 4;
 		data[typeOffset] = 99;
 		try {
 			BatchCodec.decode(data);
@@ -107,13 +108,13 @@ public class BatchCodecTest {
 		}
 	}
 
-	// Header for sceneId "s": short(2) + UTF(3) + seq(4) + tick(8) + count(4) = 21, then type byte.
-	private static final int FIRST_DELTA_OFFSET = 21;
+	// Header for sceneId "s": short(2) + UTF(3) + epoch(4) + seq(4) + tick(8) + count(4) = 25.
+	private static final int FIRST_DELTA_OFFSET = 25;
 
 	private static byte[] singleDelta(Delta delta) {
 		ArrayList<Delta> deltas = new ArrayList<Delta>();
 		deltas.add(delta);
-		return BatchCodec.encode(new SceneBatch("s", 1, 0L, deltas));
+		return BatchCodec.encode(new SceneBatch("s", 3, 1, 0L, deltas));
 	}
 
 	@Test
@@ -169,7 +170,7 @@ public class BatchCodecTest {
 	@Test
 	public void rejectsNegativeDeltaCount() {
 		byte[] data = BatchCodec.encode(sampleBatch());
-		int countOffset = 2 + 2 + 19 + 4 + 8;
+		int countOffset = 2 + 2 + 19 + 4 + 4 + 8;
 		data[countOffset] = (byte) 0x80;
 		try {
 			BatchCodec.decode(data);
@@ -179,10 +180,25 @@ public class BatchCodecTest {
 	}
 
 	@Test
+	public void epochZeroIsRejected() {
+		byte[] data = singleDelta(new Delta.NodeFree(1));
+		// Epoch int sits right after [short version][UTF "s"]: offsets 5..8.
+		for (int i = 5; i <= 8; i++) {
+			data[i] = 0;
+		}
+		try {
+			BatchCodec.decode(data);
+			fail("expected CodecException");
+		} catch (CodecException e) {
+			assertTrue(e.getMessage().contains("Epoch"));
+		}
+	}
+
+	@Test
 	public void emptyBatchRoundTrips() throws Exception {
 		// The codec allows zero deltas; the MIRROR rejects empty in-order batches — that rule
 		// lives in SceneMirror, pinned by MirrorOrderingTest.
-		SceneBatch empty = new SceneBatch("s", 7, 3L, new ArrayList<Delta>());
+		SceneBatch empty = new SceneBatch("s", 9, 7, 3L, new ArrayList<Delta>());
 		assertEquals(empty, BatchCodec.decode(BatchCodec.encode(empty)));
 	}
 
@@ -190,7 +206,7 @@ public class BatchCodecTest {
 	public void tintSignEdgeValuesRoundTripExactly() throws Exception {
 		long[] edges = { 0x80000000L, 0xFF000000L, 0xFFFFFFFFL, 0x00000001L, 0x7FFFFFFFL };
 		for (long tint : edges) {
-			SceneBatch batch = new SceneBatch("s", 1, 0L, java.util.Collections.<Delta>singletonList(
+			SceneBatch batch = new SceneBatch("s", 2, 1, 0L, java.util.Collections.<Delta>singletonList(
 					new Delta.NodeProps(1, V2Wire.PROP_TINT, new double[] { (double) tint })));
 			SceneBatch decoded = BatchCodec.decode(BatchCodec.encode(batch));
 			double value = ((Delta.NodeProps) decoded.deltas.get(0)).values[0];

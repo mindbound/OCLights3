@@ -22,6 +22,11 @@ public final class ResourceInfo {
 	public byte[] bytes;
 	/** Set iff type == RES_CANVAS. */
 	public SceneCanvas canvas;
+	/**
+	 * Server-side only, never on the wire: the body was missing or failed hash validation at
+	 * restore and was replaced with blank bytes (world-backup tear). Lua-queryable later.
+	 */
+	public boolean degraded;
 
 	public ResourceInfo(int id, byte type, int width, int height, int sizeBytes, long hash) {
 		this.id = id;
@@ -40,6 +45,7 @@ public final class ResourceInfo {
 		ResourceInfo r = new ResourceInfo(id, type, width, height, sizeBytes, hash);
 		r.bytes = bytes == null ? null : bytes.clone();
 		r.canvas = canvas == null ? null : canvas.copy();
+		r.degraded = degraded;
 		return r;
 	}
 

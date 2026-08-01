@@ -34,6 +34,7 @@ public final class BatchCodec {
 			DataOutputStream out = new DataOutputStream(bytes);
 			out.writeShort(V2Wire.PROTOCOL_VERSION);
 			out.writeUTF(batch.sceneId);
+			out.writeInt(batch.epoch);
 			out.writeInt(batch.seq);
 			out.writeLong(batch.serverTick);
 			out.writeInt(batch.deltas.size());
@@ -114,6 +115,9 @@ public final class BatchCodec {
 			if (version != V2Wire.PROTOCOL_VERSION)
 				throw new CodecException("Unsupported protocol version " + version);
 			String sceneId = in.readUTF();
+			int epoch = in.readInt();
+			if (epoch == 0)
+				throw new CodecException("Epoch 0 is reserved");
 			int seq = in.readInt();
 			long tick = in.readLong();
 			int count = in.readInt();
@@ -125,7 +129,7 @@ public final class BatchCodec {
 			}
 			if (in.read() != -1)
 				throw new CodecException("Trailing data after batch");
-			return new SceneBatch(sceneId, seq, tick, deltas);
+			return new SceneBatch(sceneId, epoch, seq, tick, deltas);
 		} catch (EOFException e) {
 			throw new CodecException("Truncated batch", e);
 		} catch (IOException e) {

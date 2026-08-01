@@ -7,12 +7,14 @@ package ds.mods.OCLights2.v2.scene;
  */
 public final class SceneSnapshot {
 	public final String sceneId;
+	public final int epoch;
 	public final int seq;
 	public final long serverTick;
 	public final SceneState state;
 
-	public SceneSnapshot(String sceneId, int seq, long serverTick, SceneState state) {
+	public SceneSnapshot(String sceneId, int epoch, int seq, long serverTick, SceneState state) {
 		this.sceneId = sceneId;
+		this.epoch = epoch;
 		this.seq = seq;
 		this.serverTick = serverTick;
 		this.state = state;

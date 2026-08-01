@@ -41,9 +41,10 @@ public class MessageCodecTest {
 
 	@Test
 	public void heartbeatRoundTrips() throws Exception {
-		byte[] data = MessageCodec.encodeHeartbeat(new MessageCodec.Heartbeat("scene-a", 41));
+		byte[] data = MessageCodec.encodeHeartbeat(new MessageCodec.Heartbeat("scene-a", 9, 41));
 		MessageCodec.Heartbeat hb = MessageCodec.decodeHeartbeat(data);
 		assertEquals("scene-a", hb.sceneId);
+		assertEquals(9, hb.epoch);
 		assertEquals(41, hb.seq);
 	}
 
@@ -93,8 +94,23 @@ public class MessageCodecTest {
 	}
 
 	@Test
+	public void epochZeroHeartbeatIsRejected() {
+		byte[] data = MessageCodec.encodeHeartbeat(new MessageCodec.Heartbeat("s", 1, 1));
+		// Epoch int after [short version][UTF "s"]: offsets 5..8.
+		for (int i = 5; i <= 8; i++) {
+			data[i] = 0;
+		}
+		try {
+			MessageCodec.decodeHeartbeat(data);
+			fail("expected CodecException");
+		} catch (CodecException e) {
+			assertTrue(e.getMessage().contains("Epoch"));
+		}
+	}
+
+	@Test
 	public void trailingDataIsRejected() {
-		byte[] data = MessageCodec.encodeHeartbeat(new MessageCodec.Heartbeat("s", 1));
+		byte[] data = MessageCodec.encodeHeartbeat(new MessageCodec.Heartbeat("s", 1, 1));
 		byte[] extended = java.util.Arrays.copyOf(data, data.length + 3);
 		try {
 			MessageCodec.decodeHeartbeat(extended);
@@ -121,6 +137,7 @@ public class MessageCodecTest {
 		SceneSnapshot snapshot = server.snapshot();
 		SceneSnapshot decoded = SnapshotCodec.decode(SnapshotCodec.encode(snapshot));
 		assertEquals("scene-x", decoded.sceneId);
+		assertEquals(server.epoch(), decoded.epoch);
 		assertEquals(snapshot.seq, decoded.seq);
 		assertEquals(77L, decoded.serverTick);
 		assertTrue(snapshot.state.contentEquals(decoded.state));
@@ -191,7 +208,7 @@ public class MessageCodecTest {
 		ArrayList<Delta> deltas = new ArrayList<Delta>();
 		deltas.add(new Delta.NodeFree(1));
 		byte[] batchPayload = ds.mods.OCLights2.v2.protocol.BatchCodec.encode(
-				new ds.mods.OCLights2.v2.protocol.SceneBatch("s", 1, 0L, deltas));
+				new ds.mods.OCLights2.v2.protocol.SceneBatch("s", 1, 1, 0L, deltas));
 		try {
 			SnapshotCodec.decode(batchPayload);
 			fail("expected CodecException");

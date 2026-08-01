@@ -36,6 +36,7 @@ public final class SnapshotCodec {
 			DataOutputStream out = new DataOutputStream(bytes);
 			out.writeShort(V2Wire.PROTOCOL_VERSION);
 			out.writeUTF(snapshot.sceneId);
+			out.writeInt(snapshot.epoch);
 			out.writeInt(snapshot.seq);
 			out.writeLong(snapshot.serverTick);
 			SceneState state = snapshot.state;
@@ -90,6 +91,9 @@ public final class SnapshotCodec {
 			if (version != V2Wire.PROTOCOL_VERSION)
 				throw new CodecException("Unsupported protocol version " + version);
 			String sceneId = in.readUTF();
+			int epoch = in.readInt();
+			if (epoch == 0)
+				throw new CodecException("Epoch 0 is reserved");
 			int seq = in.readInt();
 			long tick = in.readLong();
 			SceneState state = new SceneState();
@@ -157,7 +161,7 @@ public final class SnapshotCodec {
 			if (state.nextNodeId < 1
 					|| (!state.nodes.isEmpty() && state.nextNodeId <= state.nodes.lastKey()))
 				throw new CodecException("Node id counter inconsistent with contents");
-			return new SceneSnapshot(sceneId, seq, tick, state);
+			return new SceneSnapshot(sceneId, epoch, seq, tick, state);
 		} catch (EOFException e) {
 			throw new CodecException("Truncated snapshot", e);
 		} catch (IOException e) {

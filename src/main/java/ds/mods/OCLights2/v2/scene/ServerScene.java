@@ -20,6 +20,8 @@ import ds.mods.OCLights2.v2.protocol.V2Wire;
  */
 public final class ServerScene {
 	public final String sceneId;
+	/** Incarnation stamp: nonzero, minted at creation, restored with persistence. */
+	private final int epoch;
 	private final SceneState state;
 	private int seq;
 	private long currentTick;
@@ -29,11 +31,33 @@ public final class ServerScene {
 		this(sceneId, 0);
 	}
 
-	/** initialSeq is exposed for persistence restore and wraparound testing. */
+	/** initialSeq is exposed for wraparound testing; a fresh epoch is minted. */
 	public ServerScene(String sceneId, int initialSeq) {
+		this(sceneId, initialSeq, mintEpoch(), new SceneState());
+	}
+
+	/** Persistence-restore constructor: same incarnation continues (epoch must be nonzero). */
+	public ServerScene(String sceneId, int initialSeq, int epoch, SceneState state) {
+		if (epoch == 0)
+			throw new IllegalArgumentException("Epoch must be nonzero");
 		this.sceneId = sceneId;
-		this.state = new SceneState();
+		this.epoch = epoch;
+		this.state = state;
 		this.seq = initialSeq;
+	}
+
+	/** Public: a divergent restore (degraded bodies) mints a fresh incarnation too. */
+	public static int mintEpoch() {
+		java.util.Random random = new java.util.Random();
+		int epoch;
+		do {
+			epoch = random.nextInt();
+		} while (epoch == 0); // 0 is the mirrors' "no epoch adopted yet" sentinel
+		return epoch;
+	}
+
+	public int epoch() {
+		return epoch;
 	}
 
 	public SceneState state() {
@@ -159,7 +183,7 @@ public final class ServerScene {
 		if (staged.size() > V2Wire.MAX_DELTAS)
 			throw new IllegalStateException("Staged delta count exceeds wire cap: " + staged.size());
 		seq++;
-		SceneBatch batch = new SceneBatch(sceneId, seq, currentTick, staged);
+		SceneBatch batch = new SceneBatch(sceneId, epoch, seq, currentTick, staged);
 		staged.clear();
 		return batch;
 	}
@@ -170,8 +194,9 @@ public final class ServerScene {
 	 * bodies they lack; stripped textures arrive in the pending state). Snapshots are
 	 * batch-boundary artifacts: taking one with staged-but-unsealed deltas would stamp
 	 * state from batch N+1 with seq N, so it is refused. Call under the scene lock; the
-	 * returned copy may be handed to any thread. Persistence serializes {@link #state()}
-	 * directly and does not use this method.
+	 * returned copy may be handed to any thread. Persistence DELIBERATELY rides this method
+	 * (one codec, two duties — same batch-boundary and byte-stripping rules); bodies go to
+	 * the ResourceStore separately.
 	 */
 	public SceneSnapshot snapshot() {
 		if (!staged.isEmpty())
@@ -182,6 +207,6 @@ public final class ServerScene {
 				res.bytes = null;
 			}
 		}
-		return new SceneSnapshot(sceneId, seq, currentTick, copy);
+		return new SceneSnapshot(sceneId, epoch, seq, currentTick, copy);
 	}
 }
