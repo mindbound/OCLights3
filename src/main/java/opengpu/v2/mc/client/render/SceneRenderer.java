@@ -299,17 +299,14 @@ public final class SceneRenderer {
 		mirror.clearDirty();
 	}
 
-	/** Scene logical size = the first (lowest-id) visible-or-not canvas node's canvas. */
+	/**
+	 * Scene logical size, from the one place that defines which canvas is the display.
+	 * The rule and its fragility live on {@link opengpu.v2.scene.SceneState#displayCanvas()}
+	 * rather than here, so the server side and this pre-pass cannot drift on it.
+	 */
 	private static int[] sceneLogicalSize(SceneMirror mirror) {
-		for (opengpu.v2.scene.SceneNode node : mirror.state().nodes.values()) {
-			if (node.type == V2Wire.NODE_CANVAS) {
-				ResourceInfo res = mirror.state().resources.get(node.ref);
-				if (res != null && res.type == V2Wire.RES_CANVAS) {
-					return new int[] { res.width, res.height };
-				}
-			}
-		}
-		return null;
+		ResourceInfo res = mirror.state().displayCanvas();
+		return res == null ? null : new int[] { res.width, res.height };
 	}
 
 	/** Full GL teardown (world unload / disconnect), render thread. */
