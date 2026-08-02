@@ -209,6 +209,10 @@ public class GuiScene extends GuiScreen {
 			return;
 		}
 
+		// Deliberately NOT SurfaceFit: that fills its surface, this insets to 90% of the GUI
+		// and snaps to whole pixels, and — unlike the wall — the forward and inverse here
+		// share the stored draw rect below, so they cannot drift from each other. Sharing
+		// them would mean parameterising the margin and the integer snapping to buy nothing.
 		// Fit the scene into 90% of the GUI, preserving aspect.
 		double maxW = width * 0.9, maxH = height * 0.9;
 		double scale = Math.min(maxW / size[0], maxH / size[1]);

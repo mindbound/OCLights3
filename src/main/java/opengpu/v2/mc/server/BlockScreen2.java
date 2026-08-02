@@ -14,6 +14,7 @@ import net.minecraft.world.World;
 import cpw.mods.fml.relauncher.Side;
 import cpw.mods.fml.relauncher.SideOnly;
 import opengpu.OpenGPU;
+import opengpu.v2.mc.SurfaceFit;
 
 /**
  * The v2 screen block. Faces the player on placement (metadata 2..5 = N/S/W/E); its TESR
@@ -89,81 +90,22 @@ public class BlockScreen2 extends BlockContainer {
 	/**
 	 * A hit anywhere on a wall to LOGICAL scene coordinates, or null on a letterbox bar.
 	 *
-	 * The wall-space position is (tileCol + faceU, tileRow + faceV) in tile units, and the
-	 * scene is letterboxed into the wall rectangle. This MUST mirror ScreenRenderer's quad
-	 * exactly — the single-tile version of this already shipped a 63-row offset because the
-	 * forward and inverse mappings were written separately.
+	 * The wall-space position is (tileCol + faceU, tileRow + faceV) in tile units; SurfaceFit
+	 * owns the letterbox and its inverse, so this cannot drift from the quad the TESR draws.
+	 * It did once — the single-tile version shipped a 63-row offset because the forward and
+	 * inverse mappings were separate transcriptions of the same arithmetic.
 	 */
 	private static int[] wallHitToLogical(TileEntityScreen2 hit, TileEntityScreen2 origin,
 			int side, float hitX, float hitY, float hitZ) {
-		int wallW = origin.wallWidth();
-		int wallH = origin.wallHeight();
-		// CONSTRAINT: the renderer letterboxes against the LIVE canvas size
-		// (SceneRenderer.sizeFor), while this inverse assumes the default. They agree only
-		// because ensureImplicitCanvas() is the sole caller of createCanvas() and always
-		// asks for DEFAULT_WIDTH x DEFAULT_HEIGHT. The first resolution control added to the
-		// GPU breaks that silently: the GUI would stay correct (GuiScene.toLogical uses the
-		// live size) while every in-world click drifted, growing toward the wall's edges.
-		// Whoever adds it must plumb the real size here.
-		int sceneW = TileEntityGpu2.DEFAULT_WIDTH;
-		int sceneH = TileEntityGpu2.DEFAULT_HEIGHT;
-
+		// CONSTRAINT: the renderer fits against the LIVE canvas size (SceneRenderer.sizeFor)
+		// while this assumes the default. They agree only because ensureImplicitCanvas() is
+		// the sole caller of createCanvas() and always asks for DEFAULT_WIDTH x
+		// DEFAULT_HEIGHT. A resolution control has to plumb the real size to BOTH — the
+		// shared fit removes the arithmetic as a divergence risk, not this input.
+		SurfaceFit fit = SurfaceFit.of(origin.wallWidth(), origin.wallHeight(),
+				TileEntityGpu2.DEFAULT_WIDTH, TileEntityGpu2.DEFAULT_HEIGHT);
 		// Position across the whole wall, in tiles, from its bottom-left as the viewer sees it.
-		double wallU = hit.wallCol() + faceU(side, hitX, hitZ);
-		double wallV = hit.wallRow() + hitY;
-
-		// The image rectangle inside the wall, same fit the renderer computes.
-		double halfW = wallW * 0.5, halfH = wallH * 0.5;
-		double sceneAspect = (double) sceneW / sceneH;
-		double wallAspect = (double) wallW / wallH;
-		if (sceneAspect >= wallAspect) {
-			halfH = halfW / sceneAspect;
-		} else {
-			halfW = halfH * sceneAspect;
-		}
-		double centreU = wallW * 0.5, centreV = wallH * 0.5;
-		double su = (wallU - (centreU - halfW)) / (2.0 * halfW);
-		double sv = ((centreV + halfH) - wallV) / (2.0 * halfH); // canvas origin is top-left
-		if (su < 0.0 || su >= 1.0 || sv < 0.0 || sv >= 1.0) {
-			return null;
-		}
-		int lx = (int) (su * sceneW);
-		int ly = (int) (sv * sceneH);
-		return new int[] { Math.max(0, Math.min(sceneW - 1, lx)),
-				Math.max(0, Math.min(sceneH - 1, ly)) };
-	}
-
-	/**
-	 * Face hit to LOGICAL scene coordinates, or null when the hit landed on a letterbox bar.
-	 *
-	 * This is the exact inverse of the quad the TESR draws: the scene is inset inside the
-	 * square face to preserve its aspect, so mapping the whole face to the whole scene puts
-	 * every click tens of rows away from the pixel the player aimed at. The two mappings live
-	 * in different files and MUST agree.
-	 */
-	private static int[] faceHitToLogical(int side, float hitX, float hitY, float hitZ) {
-		int sceneW = TileEntityGpu2.DEFAULT_WIDTH;
-		int sceneH = TileEntityGpu2.DEFAULT_HEIGHT;
-		double aspect = (double) sceneW / sceneH;
-		double halfW = 0.5, halfH = 0.5;
-		if (aspect >= 1.0) {
-			halfH = 0.5 / aspect;
-		} else {
-			halfW = 0.5 * aspect;
-		}
-		// Face-local coordinates in [0,1], u left-to-right as the player sees it.
-		double u = faceU(side, hitX, hitZ);
-		// The quad spans [0.5-half, 0.5+half] on each axis of the face.
-		double su = (u - (0.5 - halfW)) / (2.0 * halfW);
-		// hitY runs bottom-to-top; the canvas origin is top-left.
-		double sv = ((0.5 + halfH) - hitY) / (2.0 * halfH);
-		if (su < 0.0 || su >= 1.0 || sv < 0.0 || sv >= 1.0) {
-			return null;
-		}
-		int lx = (int) (su * sceneW);
-		int ly = (int) (sv * sceneH);
-		return new int[] { Math.max(0, Math.min(sceneW - 1, lx)),
-				Math.max(0, Math.min(sceneH - 1, ly)) };
+		return fit.toLogical(hit.wallCol() + faceU(side, hitX, hitZ), hit.wallRow() + hitY);
 	}
 
 	/**

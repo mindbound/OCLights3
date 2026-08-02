@@ -7,6 +7,7 @@ import net.minecraft.util.ResourceLocation;
 
 import org.lwjgl.opengl.GL11;
 
+import opengpu.v2.mc.SurfaceFit;
 import opengpu.v2.mc.client.V2ClientRuntime;
 import opengpu.v2.mc.server.TileEntityScreen2;
 
@@ -59,15 +60,13 @@ public class ScreenRenderer extends TileEntitySpecialRenderer {
 		int wallW = screen.wallWidth();
 		int wallH = screen.wallHeight();
 		int[] size = runtime.renderer().sizeFor(sceneId);
+		// SurfaceFit is shared with BlockScreen2's click inverse: one definition of the
+		// letterbox, so a click cannot land on a different pixel than the one drawn there.
 		double halfW = wallW * 0.5, halfH = wallH * 0.5;
 		if (size != null && size[0] > 0 && size[1] > 0) {
-			double sceneAspect = (double) size[0] / size[1];
-			double wallAspect = (double) wallW / wallH;
-			if (sceneAspect >= wallAspect) {
-				halfH = halfW / sceneAspect; // limited by width
-			} else {
-				halfW = halfH * sceneAspect; // limited by height
-			}
+			SurfaceFit fit = SurfaceFit.of(wallW, wallH, size[0], size[1]);
+			halfW = fit.halfWidth();
+			halfH = fit.halfHeight();
 		}
 
 		boolean lighting = GL11.glIsEnabled(GL11.GL_LIGHTING);
