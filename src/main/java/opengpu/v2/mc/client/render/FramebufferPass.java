@@ -210,7 +210,34 @@ public final class FramebufferPass {
 	// FBO lifecycle helpers (OpenGlHelper wrappers only; see ANGELICA-NOTES rule 1)
 
 	/** Create an FBO with an RGBA8 color attachment. Returns {fbo, colorTexture} or null. */
+	/**
+	 * Largest scene dimension this GL context can allocate.
+	 *
+	 * GL_MAX_TEXTURE_SIZE is the binding limit here: the scene FBO's only attachment is a
+	 * colour TEXTURE, so GL_MAX_RENDERBUFFER_SIZE — which the design names alongside it —
+	 * does not apply until something attaches a renderbuffer. Queried lazily because it
+	 * needs a current context, and cached because the answer cannot change within one.
+	 */
+	public static int maxSceneDimension() {
+		if (maxDimension < 0) {
+			maxDimension = GL11.glGetInteger(GL11.GL_MAX_TEXTURE_SIZE);
+		}
+		return maxDimension;
+	}
+
+	private static int maxDimension = -1;
+
 	public static int[] createSceneFbo(int width, int height) {
+		// Checked BEFORE any GL call. glTexImage2D past GL_MAX_TEXTURE_SIZE raises
+		// GL_INVALID_VALUE and allocates nothing, which then surfaces only as an incomplete
+		// framebuffer — a confusing symptom for a knowable cause — and leaves an error in the
+		// queue for whichever mod calls glGetError next. Unreachable while the scene size is
+		// a compile-time constant; the moment resolution becomes settable it is the first
+		// thing a program can drive out of range.
+		int max = maxSceneDimension();
+		if (width <= 0 || height <= 0 || width > max || height > max) {
+			return null;
+		}
 		// Restored before returning: leaving the new color attachment bound would let a
 		// later draw sample a texture attached to the active render target.
 		int previousTexture = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);

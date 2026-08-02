@@ -387,32 +387,33 @@ public class TileEntityScreen2 extends TileEntity implements Environment {
 	private static final int MAX_WALL_CELLS = MAX_WALL_SPAN * MAX_WALL_SPAN;
 
 	/**
-	 * Write this tile's membership, and sync only what a client can actually observe.
+	 * Write this tile's membership and sync it.
 	 *
-	 * A SATELLITE's entire client-visible state is one bit. {@link ScreenRenderer} returns at
-	 * {@code !isOrigin()} before reading a single geometry field, and no other client-side
-	 * code reads any of them — so a satellite whose col/row shifted, or whose wall grew, or
-	 * whose origin moved to a different tile, looks identical on screen and needs no packet.
-	 * Sending one anyway is what made a reshape expensive: 1.7.10's PlayerInstance stops
-	 * accumulating individual block changes at 64 flags per chunk and escalates to a full
-	 * S21PacketChunkData for every affected section PLUS a description packet for every tile
-	 * entity in them, so a 16x16 wall turned a seven-int geometry change into two whole
-	 * chunk sections re-serialised to every watching player.
+	 * EVERY tile syncs on every geometry change, satellites included, and that is load
+	 * bearing. An attempt to send only "what a client can observe" — an origin whose
+	 * geometry moved, or a tile crossing the origin/satellite line — was WRONG, because a
+	 * satellite's geometry is observed client-side after all:
 	 *
-	 * Now only two things reach the wire: an origin whose rendered geometry changed, and any
-	 * tile that crossed the origin/satellite line. A reshape that keeps its membership costs
-	 * one packet, not 256.
+	 *   BlockScreen2.onBlockActivated runs on BOTH SIDES (it predicts the interaction
+	 *   client-side) and passes the CLICKED tile — usually a satellite — to
+	 *   wallHitToLogical, which reads its wallCol()/wallRow(). It also calls origin() on it,
+	 *   which needs a current originX/Y/Z: if the origin role moves between two tiles while
+	 *   a third stays a satellite, that third tile's stale pointer resolves the OLD origin,
+	 *   whose sceneId is now null.
 	 *
-	 * IF a client-side caller is ever added that reads a satellite's wallW/wallH/col/row or
-	 * resolves origin() from one, this optimisation becomes a desync and must be revisited —
-	 * chunk load still sends the full state via getDescriptionPacket, so the staleness is
-	 * invisible until something looks.
+	 * Either way the client and server disagree on the return value, which is precisely the
+	 * ghost-block failure the comment in onBlockActivated warns about.
+	 *
+	 * The packet cost is real — 1.7.10's PlayerInstance stops accumulating individual block
+	 * changes at 64 flags per chunk and escalates to a full S21PacketChunkData per affected
+	 * section plus a description packet for every tile entity in it — but it is a cost, and
+	 * ghost blocks on every right-click near a wall edge are a defect. Getting it back needs
+	 * the click path to derive a tile's cell from the ORIGIN's synced geometry instead of
+	 * reading the satellite's own copy, so satellites genuinely hold nothing observable.
 	 */
 	private void applyWall(int ox, int oy, int oz, int width, int height, int c, int r) {
 		boolean changed = originX != ox || originY != oy || originZ != oz
 				|| wallW != width || wallH != height || col != c || row != r;
-		boolean wasOrigin = isOrigin();
-		boolean geometryChanged = wallW != width || wallH != height || col != c || row != r;
 		originX = ox;
 		originY = oy;
 		originZ = oz;
@@ -442,11 +443,8 @@ public class TileEntityScreen2 extends TileEntity implements Environment {
 				// origin), and reconcileDriver() clears it once the driver stops claiming us.
 				sceneId = null;
 			}
-			// Always persist: the save path stores every field, observable or not.
 			markDirty();
-			if (wasOrigin != isOrigin() || (isOrigin() && geometryChanged)) {
-				worldObj.markBlockForUpdate(xCoord, yCoord, zCoord);
-			}
+			worldObj.markBlockForUpdate(xCoord, yCoord, zCoord);
 		}
 	}
 

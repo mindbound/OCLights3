@@ -51,13 +51,25 @@ public final class SceneRenderer {
 		 * unrelated batch happens to arrive.
 		 */
 		boolean uploadDirty;
+		/**
+		 * Logical size whose FBO creation already failed. One attempt per distinct size:
+		 * retrying costs a real glTexImage2D plus teardown on EVERY pre-pass frame and will
+		 * keep failing for the same reason. A later resize clears this and retries naturally.
+		 */
+		int failedWidth = -1;
+		int failedHeight = -1;
 		final Map<Integer, TexEntry> textures = new HashMap<Integer, TexEntry>();
 	}
 
 	private final Map<String, SceneGl> scenes = new HashMap<String, SceneGl>();
 	private final FramebufferPass pass = new FramebufferPass();
 	private final Canvas2dRenderer canvasRenderer = new Canvas2dRenderer();
-	private boolean fboFailureLogged;
+	/**
+	 * One-shot for "this machine has no FBO support at all", which is a session-wide fact.
+	 * Per-scene allocation failures are NOT logged through this — they used to be, so the
+	 * second failure anywhere in a session was silent forever.
+	 */
+	private boolean fboUnsupportedLogged;
 
 	/** The scene's rendered texture for surfaces to draw, or -1 if not yet rendered. */
 	public int colorTextureFor(String sceneId) {
@@ -77,8 +89,8 @@ public final class SceneRenderer {
 	 */
 	public void prePass(MirrorClient mirrors, Set<String> usedScenes) {
 		if (!FramebufferPass.isSupported()) {
-			if (!fboFailureLogged) {
-				fboFailureLogged = true;
+			if (!fboUnsupportedLogged) {
+				fboUnsupportedLogged = true;
 				OpenGPU.logger.warn("Framebuffer objects unavailable; v2 scene rendering disabled "
 						+ "(the non-FBO fallback arrives in a later increment)");
 			}
@@ -240,24 +252,34 @@ public final class SceneRenderer {
 		}
 		boolean resized = gl.fbo != -1 && (gl.width != size[0] || gl.height != size[1]);
 		if (gl.fbo == -1 || resized) {
-			if (resized) {
-				FramebufferPass.deleteSceneFbo(gl.fbo, gl.colorTex);
-				gl.fbo = -1;
-				gl.colorTex = -1;
-				gl.everRendered = false;
+			if (size[0] == gl.failedWidth && size[1] == gl.failedHeight) {
+				return; // already tried this size; keep showing whatever is on screen
 			}
+			// Create BEFORE deleting. The old FBO is a WORKING display: tearing it down first
+			// meant a failed resize turned a visible screen black, and then re-attempted the
+			// same doomed allocation every single frame. sizeFor() reports the FBO's real
+			// dimensions, so keeping the old one also keeps the surface letterbox coherent
+			// with what is actually in the texture.
 			int[] created = FramebufferPass.createSceneFbo(size[0], size[1]);
 			if (created == null) {
-				if (!fboFailureLogged) {
-					fboFailureLogged = true;
-					OpenGPU.logger.warn("Scene FBO creation failed (" + size[0] + "x" + size[1] + ")");
-				}
+				gl.failedWidth = size[0];
+				gl.failedHeight = size[1];
+				int max = FramebufferPass.maxSceneDimension();
+				OpenGPU.logger.warn("Scene FBO creation failed (" + size[0] + "x" + size[1]
+						+ "; this context allows up to " + max + "x" + max
+						+ "); keeping the previous surface");
 				return;
+			}
+			if (gl.fbo != -1) {
+				FramebufferPass.deleteSceneFbo(gl.fbo, gl.colorTex);
 			}
 			gl.fbo = created[0];
 			gl.colorTex = created[1];
 			gl.width = size[0];
 			gl.height = size[1];
+			gl.everRendered = false;
+			gl.failedWidth = -1;
+			gl.failedHeight = -1;
 		}
 		if (!mirror.isDirty() && !gl.uploadDirty && gl.everRendered) {
 			return;
