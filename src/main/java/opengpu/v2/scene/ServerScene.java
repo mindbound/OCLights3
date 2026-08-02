@@ -131,6 +131,38 @@ public final class ServerScene {
 		return id;
 	}
 
+	/**
+	 * Replace a canvas with one of new dimensions, KEEPING ITS RESOURCE ID.
+	 *
+	 * Reusing the id is the point, not an optimisation. Nodes reference resources by id and
+	 * a node's ref is immutable (there is no NodeSetRef delta), so a canvas recreated under
+	 * a fresh id would need a fresh node too — and the display canvas is identified purely
+	 * by being the lowest-id canvas node ({@link SceneState#displayCanvas()}). A new node id
+	 * sorts last, silently handing the display slot to some offscreen canvas, with both
+	 * sides agreeing so nothing detects it. Same id, same node, rule intact.
+	 *
+	 * Expressed with the EXISTING delta types rather than a new resize delta, so no
+	 * PROTOCOL_VERSION bump and no save migration: the applier's create rejects an id that
+	 * already exists, but the free immediately before it has removed the entry, and deltas
+	 * apply in order on both sides. Content is not carried over — the new canvas starts
+	 * empty, which is also what a fresh {@code SceneCanvas} gives us for free.
+	 *
+	 * The node's ref dangles for exactly the width of the free, which the free path already
+	 * documents as legal and convergence-neutral.
+	 */
+	public void recreateCanvas(int resId, int width, int height, int commandCap) {
+		validateDimensions(width, height);
+		if (commandCap <= 0 || commandCap > V2Wire.MAX_COMMANDS - 2)
+			throw new IllegalArgumentException("Command cap out of range: " + commandCap);
+		ResourceInfo existing = state.resources.get(resId);
+		if (existing == null)
+			throw new IllegalStateException("Recreating unknown resource " + resId);
+		if (existing.type != V2Wire.RES_CANVAS)
+			throw new IllegalStateException("Resource " + resId + " is not a canvas");
+		applyAndStage(new Delta.ResourceFree(resId));
+		applyAndStage(new Delta.ResourceCreate(resId, V2Wire.RES_CANVAS, width, height, 0, 0, commandCap));
+	}
+
 	public int createTexture(int width, int height, byte[] bytes) {
 		validateDimensions(width, height);
 		if (bytes == null)
