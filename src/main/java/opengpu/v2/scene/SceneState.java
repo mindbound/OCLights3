@@ -19,6 +19,23 @@ public final class SceneState {
 	public int nextResourceId = 1;
 	public int nextNodeId = 1;
 
+	/** Structure only: no texture bytes cloned. For snapshots, which strip them anyway. */
+	public SceneState copyStructure() {
+		SceneState s = new SceneState();
+		for (Map.Entry<Integer, ResourceInfo> e : resources.entrySet()) {
+			ResourceInfo res = e.getValue().copyStructure();
+			// Canvases ARE their content, so they must still be deep-copied.
+			res.canvas = e.getValue().canvas == null ? null : e.getValue().canvas.copy();
+			s.resources.put(e.getKey(), res);
+		}
+		for (Map.Entry<Integer, SceneNode> e : nodes.entrySet()) {
+			s.nodes.put(e.getKey(), e.getValue().copy());
+		}
+		s.nextResourceId = nextResourceId;
+		s.nextNodeId = nextNodeId;
+		return s;
+	}
+
 	public SceneState copy() {
 		SceneState s = new SceneState();
 		for (Map.Entry<Integer, ResourceInfo> e : resources.entrySet()) {

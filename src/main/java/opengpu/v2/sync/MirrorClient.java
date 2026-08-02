@@ -138,8 +138,11 @@ public final class MirrorClient {
 			case MessageCodec.MSG_RESOURCE_BODY: {
 				MessageCodec.ResourceBody body = MessageCodec.decodeResourceBody(payload);
 				SceneMirror mirror = mirrors.get(body.sceneId);
-				if (mirror != null && mirror.deliverResourceBody(body.resId, body.bytes)) {
-					cacheBody(body.bytes);
+				if (mirror != null && mirror.deliverResourceBody(
+						body.epoch, body.resId, body.version, body.hash, body.bytes)) {
+					// Hash comes from the message: the mirror already validated against it,
+					// so recomputing here would be a second O(size) pass per delivery.
+					cacheBody(body.hash, body.bytes);
 					pruneResourceStamp(body.sceneId, body.resId);
 				}
 				break;
@@ -192,14 +195,20 @@ public final class MirrorClient {
 		Map<Integer, Long> perScene = lastResourceRequest.get(sceneId);
 		boolean anyPending = false;
 		for (ResourceInfo res : mirror.state().resources.values()) {
-			if (!res.isPending())
+			// needsBody, not isPending: a texture we hold at an older version also needs a
+			// fetch, and it renders its stale content meanwhile rather than a placeholder.
+			if (!res.needsBody())
 				continue;
 			// Content-addressed cache first: a resync flipped this back to pending, but we
-			// may already hold the validated bytes.
-			byte[] cached = bodyCache.get(res.hash);
-			if (cached != null && mirror.deliverResourceBody(res.id, cached)) {
-				pruneResourceStamp(sceneId, res.id);
-				continue;
+			// may already hold the validated bytes. Only consult it when the advertised hash
+			// actually describes the version we need.
+			if (res.knownHashVersion == res.latestVersion) {
+				byte[] cached = bodyCache.get(res.knownHash);
+				if (cached != null && mirror.deliverResourceBody(mirror.knownEpoch(), res.id,
+						res.latestVersion, res.knownHash, cached)) {
+					pruneResourceStamp(sceneId, res.id);
+					continue;
+				}
 			}
 			anyPending = true;
 			if (perScene == null) {
@@ -210,7 +219,7 @@ public final class MirrorClient {
 			if (last == null || currentTick - last >= resyncRetryTicks) {
 				perScene.put(res.id, currentTick);
 				byte[] payload = MessageCodec.encodeResourceRequest(
-						new MessageCodec.ResourceRequest(sceneId, res.id));
+						new MessageCodec.ResourceRequest(sceneId, mirror.knownEpoch(), res.id));
 				transport.sendToServer(MessageCodec.envelope(MessageCodec.MSG_RESOURCE_REQUEST, payload));
 			}
 		}
@@ -248,7 +257,7 @@ public final class MirrorClient {
 		}
 	}
 
-	private void cacheBody(byte[] bytes) {
-		bodyCache.put(V2Wire.contentHash(bytes), bytes.clone());
+	private void cacheBody(long hash, byte[] bytes) {
+		bodyCache.put(hash, bytes.clone());
 	}
 }

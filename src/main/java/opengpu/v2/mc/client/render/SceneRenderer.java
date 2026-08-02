@@ -30,7 +30,10 @@ public final class SceneRenderer {
 
 	private static final class TexEntry {
 		int glId;
-		byte[] uploadedRef;
+		// Version, NOT array identity: writeRegion mutates the array in place, so an
+		// identity check would report "already uploaded" forever while the pixels change.
+		int uploadedEpoch;
+		int uploadedVersion;
 	}
 
 	private static final class SceneGl {
@@ -109,6 +112,9 @@ public final class SceneRenderer {
 	/** Upload delivered texture bytes; free GL textures whose resources are gone. */
 	private long uploadTextures(SceneGl gl, SceneMirror mirror, long budget) {
 		Map<Integer, ResourceInfo> resources = mirror.state().resources;
+		// Part of the upload key: an epoch change reuses resource ids for different content,
+		// so a matching version alone would wrongly suppress the re-upload.
+		final int mirrorEpoch = mirror.knownEpoch();
 		// Prune first: freed resources release their GL objects immediately.
 		Iterator<Map.Entry<Integer, TexEntry>> iter = gl.textures.entrySet().iterator();
 		while (iter.hasNext()) {
@@ -125,7 +131,8 @@ public final class SceneRenderer {
 				continue; // pending: renders as the defined transparent placeholder
 			}
 			TexEntry entry = gl.textures.get(res.id);
-			if (entry != null && entry.uploadedRef == res.bytes) {
+			if (entry != null && entry.uploadedEpoch == mirrorEpoch
+					&& entry.uploadedVersion == res.version) {
 				continue;
 			}
 			long size = res.bytes.length;
@@ -143,7 +150,9 @@ public final class SceneRenderer {
 				gl.textures.put(res.id, entry);
 			}
 			uploadRgba(entry.glId, res.width, res.height, res.bytes);
-			entry.uploadedRef = res.bytes;
+			entry.uploadedEpoch = mirrorEpoch;
+			entry.uploadedVersion = res.version;
+			res.clearDirty();
 			gl.uploadDirty = true;
 		}
 		return budget;

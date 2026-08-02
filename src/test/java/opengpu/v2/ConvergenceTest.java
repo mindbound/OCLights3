@@ -67,14 +67,20 @@ public class ConvergenceTest {
 		// Mirror has the texture meta but no bytes yet: the designed pending state.
 		assertTrue(mirror.state().resources.get(texture).isPending());
 		assertNotNull(server.state().resources.get(texture).bytes);
-		assertEquals(server.state().resources.get(texture).hash,
-				mirror.state().resources.get(texture).hash);
+		assertEquals(server.state().resources.get(texture).latestVersion,
+				mirror.state().resources.get(texture).latestVersion);
 
-		// Body delivery is validated: wrong bytes are refused, correct bytes clear pending.
+		// Body delivery is validated end-to-end against the hash carried WITH the body (the
+		// mirror no longer holds an expected hash of its own — texture content is mutable,
+		// so the manifest's hash may describe an older version). A transfer whose bytes
+		// disagree with their own stated hash is refused.
 		mirror.clearDirty();
-		assertTrue(!mirror.deliverResourceBody(texture, new byte[8 * 8 * 4]));
+		byte[] serverBytes = server.state().resources.get(texture).bytes;
+		int liveVersion = mirror.state().resources.get(texture).latestVersion;
+		assertTrue(!mirror.deliverResourceBody(mirror.knownEpoch(), texture, liveVersion,
+				opengpu.v2.protocol.V2Wire.contentHash(serverBytes), new byte[8 * 8 * 4]));
 		assertTrue(mirror.state().resources.get(texture).isPending());
-		assertTrue(mirror.deliverResourceBody(texture, server.state().resources.get(texture).bytes));
+		assertTrue(deliver(mirror, texture, server.state().resources.get(texture).bytes));
 		assertTrue(!mirror.state().resources.get(texture).isPending());
 		assertTrue(mirror.isDirty());
 
@@ -128,7 +134,7 @@ public class ConvergenceTest {
 		late.applySnapshot(server.snapshot());
 		assertTrue(server.state().contentEquals(late.state()));
 		assertTrue(late.state().resources.get(texture).isPending());
-		assertTrue(late.deliverResourceBody(texture, server.state().resources.get(texture).bytes));
+		assertTrue(deliver(late, texture, server.state().resources.get(texture).bytes));
 
 		server.setCurrentTick(3);
 		server.setZ(node, -1);
@@ -203,5 +209,12 @@ public class ConvergenceTest {
 		assertTrue(server.state().contentEquals(mirror.state()));
 		assertEquals(server.currentSeq(), mirror.lastSeq());
 		assertTrue(server.currentSeq() < 0);
+	}
+
+	/** Deliver a body the way MirrorClient does: epoch + the version the mirror expects. */
+	private static boolean deliver(SceneMirror mirror, int resId, byte[] bytes) {
+		return mirror.deliverResourceBody(mirror.knownEpoch(), resId,
+				mirror.state().resources.get(resId).latestVersion,
+				opengpu.v2.protocol.V2Wire.contentHash(bytes), bytes);
 	}
 }

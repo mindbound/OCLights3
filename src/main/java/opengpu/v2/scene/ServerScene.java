@@ -25,6 +25,9 @@ public final class ServerScene {
 	private final SceneState state;
 	private int seq;
 	private long currentTick;
+	private int tickWriteBytes;
+	private int writeBudgetBytes = V2Wire.MAX_WRITE_BYTES_PER_TICK;
+	private int manifestGen;
 	private final ArrayList<Delta> staged = new ArrayList<Delta>();
 
 	public ServerScene(String sceneId) {
@@ -74,7 +77,33 @@ public final class ServerScene {
 	}
 
 	public void setCurrentTick(long tick) {
-		currentTick = tick;
+		beginTick(tick, V2Wire.MAX_WRITE_BYTES_PER_TICK);
+	}
+
+	/**
+	 * Advance to a tick and grant that tick's texture-write allowance. The allowance resets
+	 * only on a CHANGE of tick value: a mid-tick save boundary seals a batch but must not
+	 * hand out a second allowance, or the per-tick cap becomes per-seal.
+	 */
+	public void beginTick(long tick, int writeBudgetBytes) {
+		if (tick != currentTick) {
+			currentTick = tick;
+			tickWriteBytes = 0;
+		}
+		this.writeBudgetBytes = Math.max(0, writeBudgetBytes);
+	}
+
+	/**
+	 * Bumped whenever a resource's advertised hash changes without a sequence advance (a body
+	 * serve or a save computes knownHash lazily). The snapshot envelope cache keys on it, so
+	 * a cached snapshot cannot keep advertising a stale cache hint.
+	 */
+	public int manifestGen() {
+		return manifestGen;
+	}
+
+	public void bumpManifestGen() {
+		manifestGen++;
 	}
 
 	private void applyAndStage(Delta delta) {
@@ -102,9 +131,54 @@ public final class ServerScene {
 		int id = allocateResourceId();
 		applyAndStage(new Delta.ResourceCreate(id, V2Wire.RES_TEXTURE, width, height,
 				bytes.length, V2Wire.contentHash(bytes), 0));
-		// Clone: an aliased caller buffer mutated later would silently invalidate the hash.
-		state.resources.get(id).bytes = bytes.clone();
+		// Clone: an aliased caller buffer mutated later would desync the server's own state
+		// from the version the mirrors were told about.
+		ResourceInfo res = state.resources.get(id);
+		res.bytes = bytes.clone();
+		res.version = 1; // the server always holds the latest version's content
 		return id;
+	}
+
+	/**
+	 * Write packed RGBA pixels into a texture region. The pixels always travel with the
+	 * delta — there is no invalidate-and-refetch form, because that costs sizeBytes per
+	 * watcher per refresh with no bound.
+	 *
+	 * Admission is a hard per-tick byte allowance. The caller is expected to translate
+	 * refusal into back-pressure (OC's LimitReachedException → next-tick replay), never into
+	 * a degraded path.
+	 *
+	 * @throws IllegalStateException if the per-tick allowance is exhausted
+	 */
+	public void writeRegion(int resId, int x, int y, int w, int h, byte[] data) {
+		ResourceInfo res = state.resources.get(resId);
+		if (res == null)
+			throw new IllegalStateException("Unknown resource " + resId);
+		if (res.type != V2Wire.RES_TEXTURE)
+			throw new IllegalStateException("Resource " + resId + " is not a texture");
+		if (w < 1 || h < 1)
+			throw new IllegalArgumentException("Region must be at least 1x1");
+		// Long arithmetic: OC saturates out-of-range Lua integers to Integer.MAX_VALUE, so
+		// an int sum wraps negative and slips past this check.
+		if (x < 0 || y < 0 || (long) x + w > res.width || (long) y + h > res.height)
+			throw new IllegalArgumentException("Region out of bounds");
+		long len = (long) w * (long) h * 4L;
+		if (data == null || data.length != len)
+			throw new IllegalArgumentException("Data length must be w*h*4 (" + len + ")");
+		if (len > V2Wire.MAX_WRITE_REGION_BYTES)
+			throw new IllegalArgumentException(
+					"Region too large (max " + V2Wire.MAX_WRITE_REGION_BYTES + " bytes per call)");
+		if (res.latestVersion == Integer.MAX_VALUE)
+			throw new IllegalStateException("Texture version space exhausted; free and recreate it");
+		if (tickWriteBytes + len > writeBudgetBytes)
+			throw new IllegalStateException("Per-tick texture write allowance exhausted");
+		tickWriteBytes += (int) len;
+		applyAndStage(new Delta.TextureWrite(resId, res.latestVersion + 1, x, y, w, h, data));
+	}
+
+	/** Bytes of texture-write payload still admissible this tick. */
+	public int writeBudgetRemaining() {
+		return Math.max(0, writeBudgetBytes - tickWriteBytes);
 	}
 
 	private static void validateDimensions(int width, int height) {
@@ -201,12 +275,9 @@ public final class ServerScene {
 	public SceneSnapshot snapshot() {
 		if (!staged.isEmpty())
 			throw new IllegalStateException("Seal the pending batch before snapshotting");
-		SceneState copy = state.copy();
-		for (ResourceInfo res : copy.resources.values()) {
-			if (res.type == V2Wire.RES_TEXTURE) {
-				res.bytes = null;
-			}
-		}
-		return new SceneSnapshot(sceneId, epoch, seq, currentTick, copy);
+		// copyStructure, not copy: snapshots strip texture bytes anyway, so a deep copy would
+		// clone every texture's megabytes purely to drop them on the next line — real waste
+		// that streaming makes worse by taking snapshots more often.
+		return new SceneSnapshot(sceneId, epoch, seq, currentTick, state.copyStructure());
 	}
 }

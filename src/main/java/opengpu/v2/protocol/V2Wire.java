@@ -9,9 +9,12 @@ package opengpu.v2.protocol;
 public final class V2Wire {
 	private V2Wire() {}
 
-	// v2: scene incarnation epoch inserted into batch/snapshot/heartbeat headers.
+	// v3: mutable texture content. Region writes (DELTA_TEX_WRITE) ride the batch stream, a
+	// monotone per-resource version replaces the content hash as the sync identity, and the
+	// snapshot manifest / resource messages carry (version, knownHash).
+	// v2 was: scene incarnation epoch in batch/snapshot/heartbeat headers.
 	// Discipline: any layout change bumps this in the same change.
-	public static final short PROTOCOL_VERSION = 2;
+	public static final short PROTOCOL_VERSION = 3;
 
 	// Delta type ids
 	public static final byte DELTA_NODE_CREATE = 1;
@@ -26,6 +29,8 @@ public final class V2Wire {
 	/** Reserved for surface bind/unbind (payload settles with the Stage A surface work). */
 	public static final byte DELTA_BIND = 9;
 	public static final byte DELTA_UNBIND = 10;
+	/** Packed-RGBA region write into a texture (v3). Always carries its pixels. */
+	public static final byte DELTA_TEX_WRITE = 11;
 
 	// Node types
 	public static final byte NODE_CANVAS = 1;
@@ -46,6 +51,20 @@ public final class V2Wire {
 	/** Modified-UTF-8 keeps 3 bytes/char worst case: 8192 chars stays far under writeUTF's 65535-byte limit. */
 	public static final int MAX_TEXT_CHARS = 8192;
 	public static final int MAX_TEXTURE_DIM = 8192;
+
+	/** One writeRegion payload: 64x64 RGBA. Producer cap AND decoder cap. */
+	public static final int MAX_WRITE_REGION_BYTES = 16384;
+	/**
+	 * Aggregate texture-write payload admitted per scene per tick. Equal to the per-call cap
+	 * deliberately: one full-size write per tick is expressible and is the documented
+	 * contract. Enforced at admission, at seal, and at decode. Raising this is gated on batch
+	 * compression landing — every number here is a function of whether that exists.
+	 */
+	public static final int MAX_WRITE_BYTES_PER_TICK = 16384;
+
+	/** Self-describing persisted body blob: 'OGPB'. */
+	public static final int PERSIST_BODY_MAGIC = 0x4F475042;
+	public static final short PERSIST_BODY_FORMAT = 1;
 
 	public static boolean isKnownNodeType(byte type) {
 		return type == NODE_CANVAS || type == NODE_SPRITE || type == NODE_GROUP;

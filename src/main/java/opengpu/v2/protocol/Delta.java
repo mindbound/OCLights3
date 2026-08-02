@@ -224,6 +224,77 @@ public abstract class Delta {
 		}
 	}
 
+	/**
+	 * A packed-RGBA region write into a texture (v3). Always carries its pixels: there is no
+	 * "invalidate and refetch" form, because that is an amplifier rather than a throttle —
+	 * it would cost sizeBytes per watcher per refresh with no bound. Back-pressure at the
+	 * admission point is the throttle instead.
+	 *
+	 * {@code version} is the version this write PRODUCES, so an applier can assert
+	 * {@code version == latestVersion + 1} and catch a missed write independently of the
+	 * sequence-gap detector.
+	 */
+	public static final class TextureWrite extends Delta {
+		public final int resId;
+		public final int version;
+		public final int x;
+		public final int y;
+		public final int w;
+		public final int h;
+		public final byte[] pixels;
+
+		public TextureWrite(int resId, int version, int x, int y, int w, int h, byte[] pixels) {
+			if (w < 1 || h < 1)
+				throw new IllegalArgumentException("Texture write region must be at least 1x1");
+			if (w > V2Wire.MAX_TEXTURE_DIM || h > V2Wire.MAX_TEXTURE_DIM)
+				throw new IllegalArgumentException("Texture write region exceeds MAX_TEXTURE_DIM");
+			if (x < 0 || y < 0)
+				throw new IllegalArgumentException("Texture write origin must be non-negative");
+			if (version < 1)
+				throw new IllegalArgumentException("Texture write version must be >= 1");
+			if (pixels == null)
+				throw new IllegalArgumentException("Texture write needs pixels");
+			// Long arithmetic: w*h*4 overflows int well inside the legal dimension range.
+			long expected = (long) w * (long) h * 4L;
+			if (pixels.length != expected)
+				throw new IllegalArgumentException(
+						"Texture write payload must be w*h*4 (" + expected + "), got " + pixels.length);
+			if (expected > V2Wire.MAX_WRITE_REGION_BYTES)
+				throw new IllegalArgumentException(
+						"Texture write region too large (max " + V2Wire.MAX_WRITE_REGION_BYTES + " bytes)");
+			this.resId = resId;
+			this.version = version;
+			this.x = x;
+			this.y = y;
+			this.w = w;
+			this.h = h;
+			// Deltas are immutable value objects and the caller's array is a Lua-supplied
+			// buffer we do not own.
+			this.pixels = pixels.clone();
+		}
+
+		@Override
+		public byte typeId() {
+			return V2Wire.DELTA_TEX_WRITE;
+		}
+
+		@Override
+		public boolean equals(Object o) {
+			if (!(o instanceof TextureWrite))
+				return false;
+			TextureWrite d = (TextureWrite) o;
+			return resId == d.resId && version == d.version && x == d.x && y == d.y
+					&& w == d.w && h == d.h && java.util.Arrays.equals(pixels, d.pixels);
+		}
+
+		@Override
+		public int hashCode() {
+			int hash = ((resId * 31 + version) * 31 + x) * 31 + y;
+			hash = (hash * 31 + w) * 31 + h;
+			return hash * 31 + java.util.Arrays.hashCode(pixels);
+		}
+	}
+
 	/** Reserved scene-level state slot (post-chain order, scene uniforms — Stage D). */
 	public static final class SceneProp extends Delta {
 		public final int propId;

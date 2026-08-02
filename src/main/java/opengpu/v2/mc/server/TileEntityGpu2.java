@@ -247,6 +247,22 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 	// ------------------------------------------------------------------
 	// Per-tick pump (called by V2ServerRuntime on the server thread, tick END)
 
+	/**
+	 * Grant this tick's texture-write allowance, at tick START.
+	 *
+	 * This MUST run before any OC synchronized replay: a call that burned its budget late in
+	 * tick T is re-run during T+1's world tick, and if the allowance had not been reset by
+	 * then the replay would find the budget still spent — turning the promised transparent
+	 * retry into a refusal.
+	 */
+	public void serverBeginTick(long tick, int writeBudget) {
+		synchronized (sceneLock) {
+			if (scene != null) {
+				scene.beginTick(tick, writeBudget);
+			}
+		}
+	}
+
 	public void serverPump(long tick, boolean policyTick) {
 		synchronized (sceneLock) {
 			if (scene == null || host == null) {
@@ -445,10 +461,10 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 		}
 	}
 
-	public void onResourceRequest(String watcherUuid, int resId) {
+	public void onResourceRequest(String watcherUuid, int epoch, int resId) {
 		synchronized (sceneLock) {
 			if (host != null) {
-				host.onResourceRequest(watcherUuid, resId);
+				host.onResourceRequest(watcherUuid, epoch, resId);
 			}
 		}
 	}
@@ -954,6 +970,97 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 			freedSinceSave.remove(id); // id reuse must not schedule a delete of live bytes
 			chunkDirty = true;
 			return new Object[] { id };
+		}
+	}
+
+	@Callback(direct = true, limit = 8, doc = "function(width:number, height:number, data:string):number -- Create a texture from packed RGBA bytes (width*height*4); returns its id.")
+	public Object[] createTextureFrom(Context context, Arguments args) throws Exception {
+		int w = args.checkInteger(0), h = args.checkInteger(1);
+		byte[] data = args.checkByteArray(2);
+		if (w <= 0 || h <= 0 || w > V2Wire.MAX_TEXTURE_DIM || h > V2Wire.MAX_TEXTURE_DIM) {
+			throw new Exception("texture size out of range (1.." + V2Wire.MAX_TEXTURE_DIM + ")");
+		}
+		long expected = (long) w * h * 4L;
+		if (data.length != expected) {
+			throw new Exception("data length must be width*height*4 (expected " + expected
+					+ ", got " + data.length + ")");
+		}
+		synchronized (sceneLock) {
+			requireScene();
+			if (usedVramLocked() + expected > VRAM_BUDGET_BYTES) {
+				throw new Exception("not enough GPU memory");
+			}
+			int id = scene.createTexture(w, h, data);
+			freedSinceSave.remove(id); // id reuse must not schedule a delete of live bytes
+			chunkDirty = true;
+			return new Object[] { id };
+		}
+	}
+
+	@Callback(direct = true, limit = 64, doc = "function(id:number, x:number, y:number, w:number, h:number, data:string):boolean -- Write packed RGBA bytes (w*h*4, row-major, top-left origin) into a texture region. Max 16384 bytes per call and per tick; over-budget calls retry on the next tick, and return false only if another computer on this GPU also exhausted that tick's allowance.")
+	public Object[] writeRegion(Context context, Arguments args) throws Exception {
+		int id = args.checkInteger(0);
+		int x = args.checkInteger(1), y = args.checkInteger(2);
+		int w = args.checkInteger(3), h = args.checkInteger(4);
+		byte[] data = args.checkByteArray(5);
+		if (w < 1 || h < 1) {
+			throw new Exception("region must be at least 1x1");
+		}
+		long expected = (long) w * h * 4L;
+		if (expected > V2Wire.MAX_WRITE_REGION_BYTES) {
+			throw new Exception("region too large (max " + V2Wire.MAX_WRITE_REGION_BYTES
+					+ " bytes per call, e.g. 64x64 RGBA); split the write");
+		}
+		if (data.length != expected) {
+			throw new Exception("data length must be w*h*4 (expected " + expected
+					+ ", got " + data.length + ")");
+		}
+		synchronized (sceneLock) {
+			requireScene();
+			ResourceInfo res = scene.state().resources.get(id);
+			if (res == null) {
+				throw new Exception("invalid texture id " + id);
+			}
+			if (res.type != V2Wire.RES_TEXTURE) {
+				throw new Exception("writeRegion is only valid on textures "
+						+ "(canvases have no pixel bytes; draw into them)");
+			}
+			// Long arithmetic: Arguments.checkInteger SATURATES an out-of-range Lua number
+			// to Integer.MAX_VALUE instead of rejecting it, so `x + w` in int wraps negative
+			// and passes. This is the outermost of three guards, all of which must be long.
+			if (x < 0 || y < 0 || (long) x + w > res.width || (long) y + h > res.height) {
+				throw new Exception("region out of bounds");
+			}
+			if (res.latestVersion == Integer.MAX_VALUE) {
+				throw new Exception("texture version space exhausted; free and recreate the texture");
+			}
+			if (scene.writeBudgetRemaining() < expected) {
+				// First pass: burn the call budget so OC raises LimitReachedException and
+				// re-runs this call on the next tick, transparently to Lua.
+				//
+				// consumeCallBudget is a NO-OP during that synchronized replay
+				// (Machine: `if (architecture.isInitialized && !inSynchronizedCall)`), so on
+				// the replay we must not fall through to ServerScene.writeRegion — it would
+				// throw and surface as a hard Lua error, contradicting this method's own
+				// contract. The allowance is granted at tick START precisely so the replay
+				// normally finds room; if another computer on the same GPU spent it first,
+				// report the refusal honestly instead of throwing or silently dropping.
+				context.consumeCallBudget(Double.MAX_VALUE);
+				if (scene.writeBudgetRemaining() < expected) {
+					return new Object[] { false, "write allowance exhausted this tick" };
+				}
+			}
+			scene.writeRegion(id, x, y, w, h, data);
+			chunkDirty = true;
+		}
+		return new Object[] { true };
+	}
+
+	@Callback(direct = true, doc = "function():number, number -- Remaining and total writeRegion bytes for this tick.")
+	public Object[] getWriteBudget(Context context, Arguments args) throws Exception {
+		synchronized (sceneLock) {
+			requireScene();
+			return new Object[] { scene.writeBudgetRemaining(), V2Wire.MAX_WRITE_BYTES_PER_TICK };
 		}
 	}
 

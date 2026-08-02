@@ -26,8 +26,10 @@ public interface ResourceStore {
 
 	/**
 	 * Returns the stored bytes, or null when absent/unreadable. Waits on an in-flight save.
-	 * The returned array is owned exclusively by the caller (it is attached into live scene
-	 * state whose consumers rely on reference-stable, immutable bytes).
+	 * The returned array is owned exclusively by the caller and MUST NOT be retained by the
+	 * store: it is attached directly into live scene state, where writeRegion mutates it in
+	 * place. (Texture bytes were immutable before protocol v3; they are not any more, which
+	 * is also why {@link #save} must copy synchronously rather than alias.)
 	 */
 	byte[] load(String sceneId, int resId);
 

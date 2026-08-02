@@ -59,13 +59,13 @@ public class MessageCodecTest {
 	@Test
 	public void resourceBodyRoundTripsAndRejectsBadLength() throws Exception {
 		byte[] bytes = { 9, 8, 7 };
-		byte[] data = MessageCodec.encodeResourceBody(new MessageCodec.ResourceBody("s", 3, bytes));
+		byte[] data = MessageCodec.encodeResourceBody(new MessageCodec.ResourceBody("s", 7, 3, 1, opengpu.v2.protocol.V2Wire.contentHash(bytes), bytes));
 		MessageCodec.ResourceBody body = MessageCodec.decodeResourceBody(data);
 		assertEquals(3, body.resId);
 		assertArrayEquals(bytes, body.bytes);
 
 		// Corrupt the length field to something huge.
-		data[2 + 2 + 1 + 4] = (byte) 0x7F;
+		data[25] = (byte) 0x7F; // high byte of the length field
 		try {
 			MessageCodec.decodeResourceBody(data);
 			fail("expected CodecException");
@@ -82,10 +82,10 @@ public class MessageCodecTest {
 	@Test
 	public void resourceBodyClaimedLengthBeyondAvailableIsRejected() throws Exception {
 		byte[] data = MessageCodec.encodeResourceBody(
-				new MessageCodec.ResourceBody("s", 3, new byte[] { 9, 8, 7 }));
+				new MessageCodec.ResourceBody("s", 7, 3, 1, 0L, new byte[] { 9, 8, 7 }));
 		// Bump the claimed length by one past the actual payload: must throw before
 		// allocating from the claim.
-		data[2 + 3 + 4 + 3] = 4;
+		data[28] = 4; // low byte of the length field: claim one byte more than present
 		try {
 			MessageCodec.decodeResourceBody(data);
 			fail("expected CodecException");

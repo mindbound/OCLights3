@@ -171,13 +171,27 @@ public final class SceneMirror {
 	 * mirror. Rejects unknown ids (freed mid-transfer: the free cancels the transfer),
 	 * non-textures, wrong lengths, and hash mismatches (caller should re-request).
 	 */
-	public boolean deliverResourceBody(int resId, byte[] bytes) {
+	public boolean deliverResourceBody(int epoch, int resId, int version, long hash, byte[] bytes) {
+		// I-6: never install while the state is unreliable. `latestVersion` is only a
+		// trustworthy acceptance key on a mirror that has not missed deltas; a content hash
+		// used to be self-certifying regardless of mirror health, and no longer is.
+		if (needsResync || epoch != knownEpoch)
+			return false;
 		ResourceInfo res = state.resources.get(resId);
 		if (res == null || res.type != V2Wire.RES_TEXTURE || bytes == null)
 			return false;
-		if (bytes.length != res.sizeBytes || V2Wire.contentHash(bytes) != res.hash)
+		if (bytes.length != res.sizeBytes || V2Wire.contentHash(bytes) != hash)
+			return false;
+		// The body must be the version we believe is current. A body older than what the
+		// delta stream already told us about would silently roll the texture back; a newer
+		// one means we missed a write, which is a divergence we must not paper over.
+		if (version != res.latestVersion)
 			return false;
 		res.bytes = bytes.clone();
+		res.version = version;
+		res.knownHash = hash;
+		res.knownHashVersion = version;
+		res.markFullDirty();
 		dirty = true;
 		return true;
 	}
@@ -194,7 +208,25 @@ public final class SceneMirror {
 		adoptEpoch(snapshot.epoch);
 		if (sameEpoch && V2Wire.seqDelta(snapshot.seq, lastSeq) < 0)
 			return; // keep needsResync latched; the retry cadence fetches a fresh one
-		state = snapshot.state.copy();
+		SceneState fresh = snapshot.state.copy();
+		if (sameEpoch) {
+			// Carry over bytes we already hold within the same incarnation: resource ids are
+			// never reused, so bytes for (id, version) are still valid content. They land as
+			// STALE if the snapshot names a newer version, which schedules exactly one refetch
+			// instead of re-downloading every texture on every resync.
+			for (ResourceInfo old : state.resources.values()) {
+				if (old.bytes == null || old.version == 0)
+					continue;
+				ResourceInfo now = fresh.resources.get(old.id);
+				if (now != null && now.type == V2Wire.RES_TEXTURE
+						&& now.sizeBytes == old.sizeBytes && old.version <= now.latestVersion) {
+					now.bytes = old.bytes;
+					now.version = old.version;
+					now.markFullDirty();
+				}
+			}
+		}
+		state = fresh;
 		lastSeq = snapshot.seq;
 		lastServerTick = snapshot.serverTick;
 		needsResync = false;

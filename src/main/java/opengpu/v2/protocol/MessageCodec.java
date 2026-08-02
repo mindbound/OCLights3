@@ -57,22 +57,36 @@ public final class MessageCodec {
 
 	public static final class ResourceRequest {
 		public final String sceneId;
+		/** Lets the host drop requests aimed at a dead incarnation. */
+		public final int epoch;
 		public final int resId;
 
-		public ResourceRequest(String sceneId, int resId) {
+		public ResourceRequest(String sceneId, int epoch, int resId) {
 			this.sceneId = sceneId;
+			this.epoch = epoch;
 			this.resId = resId;
 		}
 	}
 
+	/**
+	 * An idempotent install of ONE NAMED VERSION of a texture — never a mutation. The hash
+	 * travels with it so the receiver can validate end-to-end and key its content-addressed
+	 * cache without recomputing.
+	 */
 	public static final class ResourceBody {
 		public final String sceneId;
+		public final int epoch;
 		public final int resId;
+		public final int version;
+		public final long hash;
 		public final byte[] bytes;
 
-		public ResourceBody(String sceneId, int resId, byte[] bytes) {
+		public ResourceBody(String sceneId, int epoch, int resId, int version, long hash, byte[] bytes) {
 			this.sceneId = sceneId;
+			this.epoch = epoch;
 			this.resId = resId;
+			this.version = version;
+			this.hash = hash;
 			this.bytes = bytes;
 		}
 	}
@@ -162,6 +176,7 @@ public final class MessageCodec {
 		try {
 			out.writeShort(V2Wire.PROTOCOL_VERSION);
 			out.writeUTF(req.sceneId);
+			out.writeInt(req.epoch);
 			out.writeInt(req.resId);
 		} catch (IOException e) {
 			throw new RuntimeException(e);
@@ -172,7 +187,11 @@ public final class MessageCodec {
 	public static ResourceRequest decodeResourceRequest(byte[] data) throws CodecException {
 		DataInputStream in = open(data);
 		try {
-			ResourceRequest req = new ResourceRequest(in.readUTF(), in.readInt());
+			String sceneId = in.readUTF();
+			int epoch = in.readInt();
+			if (epoch == 0)
+				throw new CodecException("Epoch 0 is reserved");
+			ResourceRequest req = new ResourceRequest(sceneId, epoch, in.readInt());
 			expectEnd(in);
 			return req;
 		} catch (IOException e) {
@@ -188,7 +207,10 @@ public final class MessageCodec {
 		try {
 			out.writeShort(V2Wire.PROTOCOL_VERSION);
 			out.writeUTF(body.sceneId);
+			out.writeInt(body.epoch);
 			out.writeInt(body.resId);
+			out.writeInt(body.version);
+			out.writeLong(body.hash);
 			out.writeInt(body.bytes.length);
 			out.write(body.bytes);
 		} catch (IOException e) {
@@ -201,7 +223,14 @@ public final class MessageCodec {
 		DataInputStream in = open(data);
 		try {
 			String sceneId = in.readUTF();
+			int epoch = in.readInt();
+			if (epoch == 0)
+				throw new CodecException("Epoch 0 is reserved");
 			int resId = in.readInt();
+			int version = in.readInt();
+			if (version < 1)
+				throw new CodecException("Resource body version out of range: " + version);
+			long hash = in.readLong();
 			int len = in.readInt();
 			// Also bound by the bytes actually present, so a tiny crafted message cannot
 			// force a huge allocation from a claimed length (available() is exact here).
@@ -209,7 +238,7 @@ public final class MessageCodec {
 				throw new CodecException("Resource body length out of range: " + len);
 			byte[] bytes = new byte[len];
 			in.readFully(bytes);
-			ResourceBody body = new ResourceBody(sceneId, resId, bytes);
+			ResourceBody body = new ResourceBody(sceneId, epoch, resId, version, hash, bytes);
 			expectEnd(in);
 			return body;
 		} catch (IOException e) {

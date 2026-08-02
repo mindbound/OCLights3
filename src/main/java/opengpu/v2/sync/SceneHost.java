@@ -42,6 +42,8 @@ public final class SceneHost {
 	private final SceneTransport transport;
 	private final int heartbeatInterval;
 	private final int snapshotMinIntervalTicks;
+	/** Per-(watcher, resource) re-serve floor. Independent of the snapshot floor. */
+	private final int bodyMinIntervalTicks;
 	private final int bodiesPerWatcherPerTick;
 
 	private final LinkedHashSet<String> watchers = new LinkedHashSet<String>();
@@ -54,20 +56,30 @@ public final class SceneHost {
 	private int idleTicks;
 	private boolean destroyed;
 	private int cachedSnapshotSeq;
+	private int cachedSnapshotManifestGen = -1;
 	private byte[] cachedSnapshotEnvelope;
 	private final Map<Integer, CachedBody> bodyEnvelopeCache = new HashMap<Integer, CachedBody>();
 
 	private static final class CachedBody {
-		byte[] bytesRef;
+		int version;
+		long hash;
 		byte[] envelope;
 	}
 
 	public SceneHost(ServerScene scene, SceneTransport transport,
 			int heartbeatInterval, int snapshotMinIntervalTicks, int bodiesPerWatcherPerTick) {
+		// Default body floor of 20 ticks: often enough that a streaming texture recovers
+		// within a second, rare enough to stay an amplification defence.
+		this(scene, transport, heartbeatInterval, snapshotMinIntervalTicks, 20, bodiesPerWatcherPerTick);
+	}
+
+	public SceneHost(ServerScene scene, SceneTransport transport, int heartbeatInterval,
+			int snapshotMinIntervalTicks, int bodyMinIntervalTicks, int bodiesPerWatcherPerTick) {
 		this.scene = scene;
 		this.transport = transport;
 		this.heartbeatInterval = heartbeatInterval;
 		this.snapshotMinIntervalTicks = snapshotMinIntervalTicks;
+		this.bodyMinIntervalTicks = bodyMinIntervalTicks;
 		this.bodiesPerWatcherPerTick = bodiesPerWatcherPerTick;
 	}
 
@@ -195,13 +207,20 @@ public final class SceneHost {
 	}
 
 	/** Inbound resource-body request: deduped, rate-limited, served at the tick boundary. */
-	public void onResourceRequest(String watcherKey, int resId) {
+	public void onResourceRequest(String watcherKey, int epoch, int resId) {
 		if (!watchers.contains(watcherKey))
+			return;
+		// Aimed at a dead incarnation: the bytes would be discarded on arrival.
+		if (epoch != scene.epoch())
 			return;
 		Map<Integer, Long> serves = lastBodyServe.get(watcherKey);
 		if (serves != null) {
 			Long lastServe = serves.get(resId);
-			if (lastServe != null && lastTick - lastServe < snapshotMinIntervalTicks)
+			// A body floor of its own, NOT the snapshot interval: a mutable texture
+			// legitimately needs re-fetching far more often than a scene needs resyncing,
+			// and reusing the 100-tick snapshot floor would stall a streaming texture for
+			// five seconds after any single missed write.
+			if (lastServe != null && lastTick - lastServe < bodyMinIntervalTicks)
 				return;
 		}
 		LinkedHashSet<Integer> pending = pendingBodyRequests.get(watcherKey);
@@ -259,11 +278,16 @@ public final class SceneHost {
 	}
 
 	private byte[] snapshotEnvelope() {
-		if (cachedSnapshotEnvelope == null || cachedSnapshotSeq != scene.currentSeq()) {
+		// Keyed on (seq, manifestGen): knownHash changes at body-serve and save time with no
+		// seq advance, and a snapshot advertising a stale hint silently defeats the client's
+		// content-addressed cache gate.
+		if (cachedSnapshotEnvelope == null || cachedSnapshotSeq != scene.currentSeq()
+				|| cachedSnapshotManifestGen != scene.manifestGen()) {
 			SceneSnapshot snapshot = scene.snapshot();
 			cachedSnapshotEnvelope = MessageCodec.envelope(
 					MessageCodec.MSG_SNAPSHOT, SnapshotCodec.encode(snapshot));
 			cachedSnapshotSeq = snapshot.seq;
+			cachedSnapshotManifestGen = scene.manifestGen();
 		}
 		return cachedSnapshotEnvelope;
 	}
@@ -274,15 +298,40 @@ public final class SceneHost {
 			bodyEnvelopeCache.remove(resId);
 			return null;
 		}
+		// Sweep entries for resources that are gone: each holds a whole encoded texture, and
+		// without this they survive for as long as any watcher stays subscribed.
+		if (bodyEnvelopeCache.size() > scene.state().resources.size()) {
+			Iterator<Integer> stale = bodyEnvelopeCache.keySet().iterator();
+			while (stale.hasNext()) {
+				if (!scene.state().resources.containsKey(stale.next())) {
+					stale.remove();
+				}
+			}
+		}
+		// I-5: a body names the version as of a batch boundary. Serving one with deltas
+		// staged would name a version the watchers have not been told about yet.
+		if (scene.hasStagedDeltas())
+			throw new IllegalStateException("Seal the pending batch before serving a body");
 		CachedBody cached = bodyEnvelopeCache.get(resId);
-		// Texture bytes are cloned once at create and never replaced, so reference identity
-		// is a sound cache validity check.
-		if (cached == null || cached.bytesRef != res.bytes) {
+		// VERSION, not array identity. writeRegion mutates the array in place, so the old
+		// reference check is now not merely useless but actively dangerous: identity stays
+		// stable while the content changes, and the cache would serve stale bytes forever
+		// with no symptom.
+		if (cached == null || cached.version != res.version) {
+			// The one place a whole-texture hash is affordable: an O(size) encode is already
+			// happening here, and the result is amortised over every watcher.
+			long hash = V2Wire.contentHash(res.bytes);
+			res.knownHash = hash;
+			res.knownHashVersion = res.version;
+			// The manifest's cache hint changed without a seq advance, so any cached snapshot
+			// envelope is now stale in a way seq alone cannot detect.
+			scene.bumpManifestGen();
 			cached = new CachedBody();
-			cached.bytesRef = res.bytes;
+			cached.version = res.version;
+			cached.hash = hash;
 			cached.envelope = MessageCodec.envelope(MessageCodec.MSG_RESOURCE_BODY,
-					MessageCodec.encodeResourceBody(
-							new MessageCodec.ResourceBody(scene.sceneId, resId, res.bytes)));
+					MessageCodec.encodeResourceBody(new MessageCodec.ResourceBody(
+							scene.sceneId, scene.epoch(), resId, res.version, hash, res.bytes)));
 			bodyEnvelopeCache.put(resId, cached);
 		}
 		return cached.envelope;

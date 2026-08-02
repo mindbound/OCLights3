@@ -151,7 +151,7 @@ public class ScenePersistenceTest {
 		assertTrue(texture.degraded);
 		assertEquals(8 * 8 * 4, texture.bytes.length);
 		// Hash is consistent with the blank bytes, so mirrors/body-transfer stay coherent.
-		assertEquals(V2Wire.contentHash(texture.bytes), texture.hash);
+		assertEquals(V2Wire.contentHash(texture.bytes), texture.knownHash);
 		// A degraded restore is a DIVERGENT restore: fresh epoch, so surviving mirrors
 		// hard-reset instead of silently keeping the old texture forever.
 		assertTrue(result.scene.epoch() != original.epoch());

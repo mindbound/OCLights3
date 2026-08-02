@@ -64,11 +64,57 @@ public final class DeltaApplier {
 				throw new IllegalStateException("Resource " + d.resId + " size does not match dimensions");
 			if (state.resources.containsKey(d.resId))
 				throw new IllegalStateException("Resource " + d.resId + " already exists");
-			ResourceInfo res = new ResourceInfo(d.resId, d.resType, d.width, d.height, d.sizeBytes, d.hash);
+			ResourceInfo res = new ResourceInfo(d.resId, d.resType, d.width, d.height, d.sizeBytes);
+			// A create is always version 1; the wire's hash field is that version's content
+			// hash, which doubles as the client's content-addressed cache key.
+			res.version = 0; // no bytes held yet on a mirror; the server sets 1 when it attaches
+			res.latestVersion = 1;
+			res.knownHash = d.hash;
+			res.knownHashVersion = 1;
 			if (d.resType == V2Wire.RES_CANVAS) {
 				res.canvas = new SceneCanvas(d.width, d.height, d.commandCap);
 			}
 			state.resources.put(d.resId, res);
+		} else if (delta instanceof Delta.TextureWrite) {
+			Delta.TextureWrite d = (Delta.TextureWrite) delta;
+			ResourceInfo res = state.resources.get(d.resId);
+			if (res == null)
+				throw new IllegalStateException("Texture write references unknown resource " + d.resId);
+			if (res.type != V2Wire.RES_TEXTURE)
+				throw new IllegalStateException("Texture write targets non-texture resource " + d.resId);
+			// The rect must lie wholly inside the texture. The decoder cannot check this (it
+			// holds no scene state), so this is the only place it can be enforced — and a
+			// violation on a mirror is a divergence signal, i.e. a resync trigger.
+			// LONG arithmetic: x and w are independently bounded but their sum is not, and
+			// OC's checkInteger SATURATES out-of-range Lua numbers to Integer.MAX_VALUE
+			// rather than rejecting them — so an int sum here wraps negative, passes the
+			// check, and either throws mid-blit or writes 16 KiB at an address the caller
+			// never named (which every mirror reproduces identically, so no detector fires).
+			if ((long) d.x + d.w > res.width || (long) d.y + d.h > res.height)
+				throw new IllegalStateException("Texture write region out of bounds for resource " + d.resId);
+			// Independent divergence detector: versions advance by exactly one per write, so
+			// a missed write is caught even if the sequence numbers looked continuous.
+			if (d.version != res.latestVersion + 1)
+				throw new IllegalStateException("Texture write version gap on resource " + d.resId
+						+ ": expected " + (res.latestVersion + 1) + ", got " + d.version);
+			// NO MUTATION ABOVE THIS LINE. Advancing latestVersion before the blit is what
+			// turns any blit failure into a permanent freeze: version != latestVersion
+			// forever, so every later write is silently skipped and no body is ever
+			// acceptable again.
+			// ASYMMETRY, deliberate: a mirror that does not hold this texture's bytes still
+			// tracks latestVersion (so it knows it is behind and can fetch), but has nothing
+			// to blit into. Only a side holding the previous version's bytes can apply the
+			// pixels — and then all-or-nothing, since every bound is validated above.
+			if (res.bytes != null && res.version == d.version - 1) {
+				for (int row = 0; row < d.h; row++) {
+					int srcOff = row * d.w * 4;
+					int dstOff = ((d.y + row) * res.width + d.x) * 4;
+					System.arraycopy(d.pixels, srcOff, res.bytes, dstOff, d.w * 4);
+				}
+				res.version = d.version;
+				res.unionDirtyRect(d.x, d.y, d.w, d.h);
+			}
+			res.latestVersion = d.version;
 		} else if (delta instanceof Delta.ResourceFree) {
 			// Freeing a resource that nodes or recorded commands still reference is legal;
 			// dangling references render the pending-placeholder (same as an untransferred

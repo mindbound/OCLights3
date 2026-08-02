@@ -85,6 +85,16 @@ public final class BatchCodec {
 			Delta.CanvasAppend c = (Delta.CanvasAppend) d;
 			out.writeInt(c.resId);
 			writeCommands(out, c.commands);
+		} else if (d instanceof Delta.TextureWrite) {
+			Delta.TextureWrite t = (Delta.TextureWrite) d;
+			out.writeInt(t.resId);
+			out.writeInt(t.version);
+			out.writeInt(t.x);
+			out.writeInt(t.y);
+			out.writeInt(t.w);
+			out.writeInt(t.h);
+			// No length prefix: w*h*4 is the single source of truth for the payload size.
+			out.write(t.pixels);
 		} else if (d instanceof Delta.SceneProp) {
 			Delta.SceneProp s = (Delta.SceneProp) d;
 			out.writeInt(s.propId);
@@ -124,8 +134,9 @@ public final class BatchCodec {
 			if (count < 0 || count > V2Wire.MAX_DELTAS)
 				throw new CodecException("Delta count out of range: " + count);
 			ArrayList<Delta> deltas = new ArrayList<Delta>(Math.min(count, 4096));
+			int[] writeBytes = new int[1];
 			for (int i = 0; i < count; i++) {
-				deltas.add(readDelta(in));
+				deltas.add(readDelta(in, writeBytes));
 			}
 			if (in.read() != -1)
 				throw new CodecException("Trailing data after batch");
@@ -140,7 +151,12 @@ public final class BatchCodec {
 		}
 	}
 
-	private static Delta readDelta(DataInputStream in) throws IOException, CodecException {
+	/**
+	 * @param writeBytes single-element accumulator of texture-write payload bytes seen so far
+	 *                   in this batch; the per-tick aggregate cap is enforced against it so a
+	 *                   batch cannot smuggle unbounded pixel data past the per-call cap.
+	 */
+	private static Delta readDelta(DataInputStream in, int[] writeBytes) throws IOException, CodecException {
 		byte type = in.readByte();
 		switch (type) {
 			case V2Wire.DELTA_NODE_CREATE: {
@@ -181,6 +197,34 @@ public final class BatchCodec {
 			case V2Wire.DELTA_CANVAS_APPEND: {
 				int resId = in.readInt();
 				return new Delta.CanvasAppend(resId, readCommands(in));
+			}
+			case V2Wire.DELTA_TEX_WRITE: {
+				int resId = in.readInt();
+				int version = in.readInt();
+				int x = in.readInt();
+				int y = in.readInt();
+				int w = in.readInt();
+				int h = in.readInt();
+				// Validate everything BEFORE allocating: a hostile header must not be able to
+				// make us reserve memory it never intends to fill.
+				if (w < 1 || h < 1 || w > V2Wire.MAX_TEXTURE_DIM || h > V2Wire.MAX_TEXTURE_DIM)
+					throw new CodecException("Texture write region out of range: " + w + "x" + h);
+				if (x < 0 || y < 0)
+					throw new CodecException("Texture write origin out of range: " + x + "," + y);
+				if (version < 1)
+					throw new CodecException("Texture write version out of range: " + version);
+				long len = (long) w * (long) h * 4L;
+				if (len > V2Wire.MAX_WRITE_REGION_BYTES)
+					throw new CodecException("Texture write payload too large: " + len);
+				if (len > in.available())
+					throw new CodecException("Texture write payload exceeds remaining data");
+				writeBytes[0] += (int) len;
+				if (writeBytes[0] > V2Wire.MAX_WRITE_BYTES_PER_TICK)
+					throw new CodecException("Batch texture-write payload over the per-tick cap: "
+							+ writeBytes[0]);
+				byte[] pixels = new byte[(int) len];
+				in.readFully(pixels);
+				return new Delta.TextureWrite(resId, version, x, y, w, h, pixels);
 			}
 			case V2Wire.DELTA_SCENE_PROP: {
 				int propId = in.readInt();

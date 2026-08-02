@@ -50,7 +50,11 @@ public final class SnapshotCodec {
 				out.writeInt(res.width);
 				out.writeInt(res.height);
 				out.writeInt(res.sizeBytes);
-				out.writeLong(res.hash);
+				// Written unconditionally so the record shape is fixed-width up to the canvas
+				// tail; canvases carry version 1 / no hash.
+				out.writeInt(res.type == V2Wire.RES_CANVAS ? 1 : res.latestVersion);
+				out.writeInt(res.type == V2Wire.RES_CANVAS ? 0 : res.knownHashVersion);
+				out.writeLong(res.type == V2Wire.RES_CANVAS ? 0L : res.knownHash);
 				if (res.type == V2Wire.RES_CANVAS) {
 					out.writeInt(res.canvas.commandCap);
 					BatchCodec.writeCommands(out, res.canvas.visibleCommands());
@@ -110,7 +114,13 @@ public final class SnapshotCodec {
 				int width = in.readInt();
 				int height = in.readInt();
 				int sizeBytes = in.readInt();
-				long hash = in.readLong();
+				int wireVersion = in.readInt();
+				int knownHashVersion = in.readInt();
+				long knownHash = in.readLong();
+				if (wireVersion < 1)
+					throw new CodecException("Resource " + id + " version out of range: " + wireVersion);
+				if (knownHashVersion < 0 || knownHashVersion > wireVersion)
+					throw new CodecException("Resource " + id + " knownHashVersion out of range");
 				if (width <= 0 || height <= 0
 						|| width > V2Wire.MAX_TEXTURE_DIM || height > V2Wire.MAX_TEXTURE_DIM)
 					throw new CodecException("Resource " + id + " has invalid dimensions");
@@ -118,7 +128,13 @@ public final class SnapshotCodec {
 					throw new CodecException("Resource " + id + " size does not match dimensions");
 				if (state.resources.containsKey(id))
 					throw new CodecException("Duplicate resource id " + id);
-				ResourceInfo res = new ResourceInfo(id, type, width, height, sizeBytes, hash);
+				ResourceInfo res = new ResourceInfo(id, type, width, height, sizeBytes);
+				// "I know of version V and hold no bytes." ScenePersistence.restore sets
+				// version when it attaches bytes; SceneMirror.applySnapshot via carry-over.
+				res.latestVersion = wireVersion;
+				res.version = 0;
+				res.knownHashVersion = knownHashVersion;
+				res.knownHash = knownHash;
 				if (type == V2Wire.RES_CANVAS) {
 					int cap = in.readInt();
 					ArrayList<opengpu.v2.scene.CanvasCommand> commands = BatchCodec.readCommands(in);

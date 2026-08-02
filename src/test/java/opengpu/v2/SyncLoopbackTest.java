@@ -118,7 +118,7 @@ public class SyncLoopbackTest {
 				MessageCodec.ResourceRequest req = MessageCodec.decodeResourceRequest(payload);
 				requestCounter[0]++;
 				if (SCENE.equals(req.sceneId)) {
-					host.onResourceRequest(watcher, req.resId);
+					host.onResourceRequest(watcher, req.epoch, req.resId);
 				}
 			}
 		}
@@ -326,7 +326,7 @@ public class SyncLoopbackTest {
 		// 30-byte requests every tick for the same body must be served at most once per
 		// floor window, not once per request.
 		for (long t = 2; t <= 14; t++) {
-			h.host.onResourceRequest("p1", texture);
+			h.host.onResourceRequest("p1", h.scene.epoch(), texture);
 			h.host.tick(t);
 			bodiesServed += h.countQueued("p1", MessageCodec.MSG_RESOURCE_BODY);
 			Harness.queueFor(h.toClient, "p1").clear();
@@ -414,7 +414,7 @@ public class SyncLoopbackTest {
 		h.host.tick(1);
 		assertEquals(1, Harness.queueFor(h.toClient, "p1").size()); // only the subscribe heartbeat
 		h.host.onResyncRequest("p1");
-		h.host.onResourceRequest("p1", 1);
+		h.host.onResourceRequest("p1", h.scene.epoch(), 1);
 		h.host.tick(2);
 		assertEquals(1, Harness.queueFor(h.toClient, "p1").size());
 	}

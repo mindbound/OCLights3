@@ -21,6 +21,7 @@ import opengpu.v2.persist.DirectoryResourceStore;
 import opengpu.v2.protocol.CodecException;
 import opengpu.v2.protocol.FrameChunker;
 import opengpu.v2.protocol.MessageCodec;
+import opengpu.v2.protocol.V2Wire;
 import opengpu.v2.sync.SceneHost;
 import opengpu.v2.sync.SceneTransport;
 
@@ -120,6 +121,14 @@ public final class V2ServerRuntime {
 
 	@SubscribeEvent
 	public void onServerTick(TickEvent.ServerTickEvent event) {
+		if (event.phase == TickEvent.Phase.START) {
+			// Grant write allowances BEFORE machines run this tick, so an OC synchronized
+			// replay (a call that burned its budget last tick) always finds a fresh budget.
+			for (TileEntityGpu2 te : new ArrayList<TileEntityGpu2>(hostsByScene.values())) {
+				te.serverBeginTick(tickCounter + 1, V2Wire.MAX_WRITE_BYTES_PER_TICK);
+			}
+			return;
+		}
 		if (event.phase != TickEvent.Phase.END) {
 			return;
 		}
@@ -163,7 +172,7 @@ public final class V2ServerRuntime {
 				MessageCodec.ResourceRequest req = MessageCodec.decodeResourceRequest(payload);
 				TileEntityGpu2 te = hostsByScene.get(req.sceneId);
 				if (te != null) {
-					te.onResourceRequest(senderUuid, req.resId);
+					te.onResourceRequest(senderUuid, req.epoch, req.resId);
 				}
 				break;
 			}
