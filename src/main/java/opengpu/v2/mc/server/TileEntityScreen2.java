@@ -37,6 +37,13 @@ public class TileEntityScreen2 extends TileEntity implements Environment {
 	private String sceneId;
 	/** Address of the GPU currently driving this screen (server side, persisted). */
 	private String driverAddress;
+	/**
+	 * Driver's logical size as {@code (width << 32) | height}, or 0 when nothing drives us.
+	 * One volatile long rather than two ints so a direct Lua callback on a machine thread
+	 * cannot read a half-updated pair. Not persisted and not synced — the GPU re-pushes it
+	 * every policy tick.
+	 */
+	private volatile long sceneSize;
 
 	// ------------------------------------------------------------------
 	// Multiblock wall. A lone screen is a 1x1 wall, so there is one code path, not two.
@@ -49,6 +56,14 @@ public class TileEntityScreen2 extends TileEntity implements Environment {
 	private int originX, originY, originZ;
 	/** Wall size in tiles; only meaningful on the origin. */
 	private int wallW = 1, wallH = 1;
+	/**
+	 * {@link #wallW}/{@link #wallH} as one {@code (w << 32) | h}, for readers off the server
+	 * thread. Same reasoning as {@link #sceneSize}: a direct Lua callback runs on a machine
+	 * executor thread, and two plain int loads can straddle a server-thread reshape and
+	 * return a wall shape that never existed. Kept alongside the plain fields rather than
+	 * replacing them because every server-side reader already runs on the right thread.
+	 */
+	private volatile long wallSize = (1L << 32) | 1L;
 	/** This tile's position within the wall, 0-based from the viewer's bottom-left. */
 	private int col, row;
 	private boolean wallDirty = true;
@@ -419,6 +434,7 @@ public class TileEntityScreen2 extends TileEntity implements Environment {
 		originZ = oz;
 		wallW = width;
 		wallH = height;
+		wallSize = (((long) width) << 32) | (height & 0xFFFFFFFFL);
 		col = c;
 		row = r;
 		if (node instanceof Component) {
@@ -465,6 +481,24 @@ public class TileEntityScreen2 extends TileEntity implements Environment {
 	 * watchers learn the new scene id without the TE having to reappear.
 	 */
 	public void bindScene(String gpuAddress, String newSceneId) {
+		bindScene(gpuAddress, newSceneId, 0, 0);
+	}
+
+	/**
+	 * As above, plus the driver's current logical resolution for {@link #getResolution}.
+	 *
+	 * Server-side only: neither persisted nor synced to clients, so it cannot survive into a
+	 * save to be wrong there. Clients get the size from their scene mirror instead, which is
+	 * the authority for what they draw.
+	 *
+	 * Freshness comes from setResolution pushing here directly. The policy-tick re-push in
+	 * resolveScreenLocked is only a backstop — that runs every 20 ticks, not every tick, so
+	 * relying on it alone left this a full second stale after a resize.
+	 */
+	public void bindScene(String gpuAddress, String newSceneId, int sceneW, int sceneH) {
+		// One volatile write, so a machine thread can never observe a torn (width, height)
+		// pair — the two ints only ever mean anything together.
+		sceneSize = sceneW > 0 && sceneH > 0 ? (((long) sceneW) << 32) | (sceneH & 0xFFFFFFFFL) : 0L;
 		boolean changed = !equal(sceneId, newSceneId) || !equal(driverAddress, gpuAddress);
 		driverAddress = gpuAddress;
 		sceneId = newSceneId;
@@ -591,6 +625,7 @@ public class TileEntityScreen2 extends TileEntity implements Environment {
 			originZ = wall[2];
 			wallW = wall[3];
 			wallH = wall[4];
+			wallSize = (((long) wall[3]) << 32) | (wall[4] & 0xFFFFFFFFL);
 			col = wall[5];
 			row = wall[6];
 		} else {
@@ -601,6 +636,7 @@ public class TileEntityScreen2 extends TileEntity implements Environment {
 			originZ = zCoord;
 			wallW = 1;
 			wallH = 1;
+			wallSize = (1L << 32) | 1L;
 			col = 0;
 			row = 0;
 		}
@@ -636,6 +672,7 @@ public class TileEntityScreen2 extends TileEntity implements Environment {
 			originZ = wall[2];
 			wallW = wall[3];
 			wallH = wall[4];
+			wallSize = (((long) wall[3]) << 32) | (wall[4] & 0xFFFFFFFFL);
 			col = wall[5];
 			row = wall[6];
 		}
@@ -697,9 +734,38 @@ public class TileEntityScreen2 extends TileEntity implements Environment {
 	@Override
 	public void onMessage(Message message) {}
 
-	@Callback(direct = true, doc = "function():number, number -- The scene resolution shown on this screen.")
+	/**
+	 * Logical size of whatever is currently driving this screen, or nil when nothing is.
+	 *
+	 * This reports; it does not decide. Resolution belongs to the GPU, because the scene
+	 * does — it outlives any binding, and a second copy living in the screen's chunk would
+	 * be a second save time and a second thing to reconcile.
+	 */
+	@Callback(direct = true, doc = "function():number, number -- Resolution of the scene shown here, or nil when nothing drives this screen.")
 	public Object[] getResolution(Context context, Arguments args) {
-		return new Object[] { TileEntityGpu2.DEFAULT_WIDTH, TileEntityGpu2.DEFAULT_HEIGHT };
+		long packed = sceneSize;
+		return packed == 0L ? null
+				: new Object[] { (int) (packed >>> 32), (int) packed };
+	}
+
+	/**
+	 * This screen's WALL size in blocks — advice, not a resolution.
+	 *
+	 * Deliberately reports tiles rather than a derived "preferred resolution": a 16x2 wall
+	 * fits an 8:1 image, which is right for that wall and a sliver in the GPU's own window
+	 * or on any other surface. The design's contract is one coherent logical space per
+	 * scene, so the shape is the honest thing to publish and the fitting is the program's
+	 * choice. Reported by the ORIGIN's dimensions, so every tile of a wall answers alike.
+	 */
+	@Callback(direct = true, doc = "function():number, number -- This screen's wall size in blocks (width, height).")
+	public Object[] getWallSize(Context context, Arguments args) {
+		// Reads only this tile's own packed pair: one volatile load, so the two numbers
+		// cannot straddle a reshape, and no world access from a machine thread. Resolving
+		// the origin here would be both — and is unnecessary, because a satellite's
+		// component is Visibility.None and OC refuses to invoke it at all, so anything that
+		// reaches this method IS the origin and already holds the whole wall's dimensions.
+		long packed = wallSize;
+		return new Object[] { (int) (packed >>> 32), (int) packed };
 	}
 
 	@Callback(direct = true, doc = "function():string -- Address of the GPU driving this screen, or nil.")

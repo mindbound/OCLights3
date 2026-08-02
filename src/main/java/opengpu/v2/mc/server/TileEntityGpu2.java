@@ -55,6 +55,43 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 	/** Budget estimate per canvas command slot (id + args worst case, serialized). */
 	public static final int CANVAS_SLOT_COST = 32;
 
+	/**
+	 * Largest canvas dimension a program may ask for.
+	 *
+	 * NOT derived from {@link V2Wire#MAX_TEXTURE_DIM}, which bounds a different thing: a
+	 * texture arrives as a wire body, so its transfer cost partly self-limits. A canvas has
+	 * no body — it is a command list — so nothing self-limits it, and 8192 square would be a
+	 * 256 MB client allocation from one line of Lua.
+	 *
+	 * A compile-time constant, never configurable: a decode-time bound that differs between
+	 * two peers turns a legal batch into an apply failure, which latches needsResync, and
+	 * the snapshot that would repair it carries the same over-cap resource. That is a
+	 * permanent black screen for one player, not graceful degradation.
+	 *
+	 * The real ceiling is usually {@link #VRAM_BUDGET_BYTES}, not this: 2048 square is the
+	 * whole 16 MiB budget on its own. This just stops a single dimension from running away
+	 * (a 1x4194304 canvas fits any pixel budget and no GL context will allocate it).
+	 */
+	public static final int MAX_CANVAS_DIM = 2048;
+
+	/**
+	 * Minimum server ticks between accepted resolution changes.
+	 *
+	 * MAX_CANVAS_DIM bounds how big one client allocation may be; this bounds how OFTEN it
+	 * is redone, which nothing else does. A resize is ~30 bytes on the wire (one free, one
+	 * create) and obliges every client within subscribe range to tear down and reallocate
+	 * the scene FBO and re-render the whole canvas — an amplification of roughly 500,000:1,
+	 * with no per-frame budget in front of it the way texture uploads have one. Alternating
+	 * between two sizes that both fit the VRAM budget would otherwise sustain that every
+	 * tick, for free, against every player who merely walks past.
+	 */
+	private static final int RESIZE_COOLDOWN_TICKS = 20;
+
+	/** Server tick as of the last pump, for the resize cooldown. */
+	private volatile long serverTick;
+	/** Deliberately below any real tick so the first resize is never throttled. */
+	private long lastResizeTick = -RESIZE_COOLDOWN_TICKS - 1L;
+
 	protected final Object sceneLock = new Object();
 	protected Node node;
 	private boolean addedToNetwork;
@@ -268,6 +305,10 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 	}
 
 	public void serverPump(long tick, boolean policyTick) {
+		// Before the early returns: the resize cooldown reads this from a machine thread and
+		// must keep advancing even on a tick where there is no scene yet, or the first
+		// resize after one would compare against a stale clock.
+		serverTick = tick;
 		synchronized (sceneLock) {
 			if (scene == null || host == null) {
 				return;
@@ -363,7 +404,8 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 			chunkDirty = true;
 			return;
 		}
-		screen.bindScene(node.address(), scene.sceneId);
+		int[] size = resolutionLocked();
+		screen.bindScene(node.address(), scene.sceneId, size[0], size[1]);
 	}
 
 	/**
@@ -541,7 +583,8 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 			if (!withinReach(player, screen)) {
 				return;
 			}
-			inputRouter.route(input, watcherUuid, player, screen, DEFAULT_WIDTH, DEFAULT_HEIGHT);
+			int[] res = resolutionLocked();
+			inputRouter.route(input, watcherUuid, player, screen, res[0], res[1]);
 		}
 	}
 
@@ -575,12 +618,13 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 				return;
 			}
 			String key = player.getUniqueID().toString();
+			int[] res = resolutionLocked();
 			inputRouter.route(new MessageCodec.Input(scene.sceneId, scene.epoch(),
 					MessageCodec.INPUT_POINTER_DOWN, x, y, button), key, player, screen,
-					DEFAULT_WIDTH, DEFAULT_HEIGHT);
+					res[0], res[1]);
 			inputRouter.route(new MessageCodec.Input(scene.sceneId, scene.epoch(),
 					MessageCodec.INPUT_POINTER_UP, x, y, button), key, player, screen,
-					DEFAULT_WIDTH, DEFAULT_HEIGHT);
+					res[0], res[1]);
 		}
 	}
 
@@ -746,6 +790,29 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 		}
 	}
 
+	/**
+	 * The scene's LIVE logical size, under sceneLock — the one number every consumer must
+	 * agree on.
+	 *
+	 * Everything that maps a physical hit to a logical pixel has to read this rather than
+	 * the defaults it used to hardcode: the renderer letterboxes against the live canvas
+	 * size, so a click path frozen at DEFAULT_WIDTH x DEFAULT_HEIGHT lands on a different
+	 * pixel than the one drawn under the crosshair, drifting further toward the edges.
+	 * Falls back to the defaults only before the canvas exists, where no click can land yet.
+	 */
+	private int[] resolutionLocked() {
+		ResourceInfo res = scene == null ? null : scene.state().displayCanvas();
+		return res == null ? new int[] { DEFAULT_WIDTH, DEFAULT_HEIGHT }
+				: new int[] { res.width, res.height };
+	}
+
+	/** The scene's live logical size, for the server-side click path in BlockScreen2. */
+	int[] resolution() {
+		synchronized (sceneLock) {
+			return resolutionLocked();
+		}
+	}
+
 	private void record(CanvasCommand command) throws Exception {
 		requireScene();
 		// Project against the canvas as it will look AFTER the pending publish: the flush
@@ -780,7 +847,12 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 			if (res.type == V2Wire.RES_TEXTURE) {
 				used += res.sizeBytes;
 			} else if (res.type == V2Wire.RES_CANVAS && res.canvas != null) {
-				used += (long) res.canvas.commandCap * CANVAS_SLOT_COST;
+				// Command slots AND pixels. Charging only the slots left the canvas as the
+				// single allocation this GPU can force onto every client in subscribe range
+				// that no budget bounded — the flat slot cost is the same whether the canvas
+				// is 1x1 or 2048x2048, while the client's FBO is w*h*4 either way.
+				used += (long) res.canvas.commandCap * CANVAS_SLOT_COST
+						+ (long) res.width * (long) res.height * 4L;
 			}
 		}
 		return used;
@@ -1216,13 +1288,100 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 				}
 				return new Object[] { res.width, res.height };
 			}
-			return new Object[] { DEFAULT_WIDTH, DEFAULT_HEIGHT };
+			int[] size = resolutionLocked();
+			return new Object[] { size[0], size[1] };
 		}
 	}
 
 	@Callback(direct = true, doc = "function():number, number -- The canvas resolution in logical units.")
-	public Object[] getResolution(Context context, Arguments args) {
-		return new Object[] { DEFAULT_WIDTH, DEFAULT_HEIGHT };
+	public Object[] getResolution(Context context, Arguments args) throws Exception {
+		// synchronized + requireScene like every other scene reader. This used to be a bare
+		// return of two constants, which was safe only while it read no state: `scene` is
+		// null until the first server tick resolves the node address, and a direct callback
+		// runs on a machine executor thread.
+		synchronized (sceneLock) {
+			requireScene();
+			int[] size = resolutionLocked();
+			return new Object[] { size[0], size[1] };
+		}
+	}
+
+	@Callback(direct = true, doc = "function():number, number -- The largest resolution setResolution will accept. Memory may bind first; see maxMemory/freeMemory.")
+	public Object[] maxResolution(Context context, Arguments args) {
+		return new Object[] { MAX_CANVAS_DIM, MAX_CANVAS_DIM };
+	}
+
+	@Callback(direct = true, limit = 4, doc = "function(width:number, height:number):boolean -- Set the canvas resolution. Clears the canvas. No-op if unchanged.")
+	public Object[] setResolution(Context context, Arguments args) throws Exception {
+		int w = args.checkInteger(0), h = args.checkInteger(1);
+		if (w <= 0 || h <= 0 || w > MAX_CANVAS_DIM || h > MAX_CANVAS_DIM) {
+			throw new Exception("resolution out of range (1.." + MAX_CANVAS_DIM + ")");
+		}
+		synchronized (sceneLock) {
+			requireScene();
+			ensureImplicitCanvas();
+			ResourceInfo current = scene.state().resources.get(implicitCanvasRes);
+			if (current == null) {
+				throw new Exception("GPU is still initializing");
+			}
+			// The canvas Lua draws into and the canvas that defines the resolution must be
+			// the same object. They are, by construction — the implicit canvas is created
+			// first and so holds the lowest canvas node id — but nothing enforced it, and a
+			// divergence would make this call resize something nobody is looking at while
+			// reporting success. Fail loudly instead; SceneState.displayCanvas() and
+			// DisplayCanvasTest carry the reasoning.
+			ResourceInfo display = scene.state().displayCanvas();
+			if (display == null || display.id != implicitCanvasRes) {
+				throw new Exception("internal error: the drawing canvas is not the display canvas");
+			}
+			if (current.width == w && current.height == h) {
+				return new Object[] { false }; // unchanged: do not clear the canvas for a no-op
+			}
+			// Cooldown AFTER the no-op check, so a program that re-asserts its current size
+			// is never throttled for asking a question it already knows the answer to.
+			long now = serverTick;
+			if (now - lastResizeTick < RESIZE_COOLDOWN_TICKS) {
+				throw new Exception("resolution changed too recently; "
+						+ (RESIZE_COOLDOWN_TICKS - (now - lastResizeTick)) + " tick(s) to wait");
+			}
+			// Budget: REPLACE the canvas's charge, do not add to it. The pattern used by
+			// createTexture — used + new > BUDGET — would refuse a SHRINK whenever the
+			// canvas is what filled the budget, i.e. you could not make it smaller because
+			// it was too big.
+			long oldCost = (long) current.width * (long) current.height * 4L;
+			long newCost = (long) w * (long) h * 4L;
+			if (usedVramLocked() - oldCost + newCost > VRAM_BUDGET_BYTES) {
+				throw new Exception("not enough GPU memory");
+			}
+			// Flush FIRST. This callback is direct, so it stages its deltas the moment Lua
+			// calls it, while commands recorded earlier in the same tick are still sitting
+			// in the pending buffer — without this they would be published AFTER the resize
+			// and silently resurrect pre-resize drawing on the new canvas.
+			flushRecordingLocked();
+			// Same resource id, so the display node keeps pointing at it and the lowest-id
+			// display rule is untouched. See ServerScene.recreateCanvas.
+			scene.recreateCanvas(implicitCanvasRes, w, h, CANVAS_COMMAND_CAP);
+			// The canvas and the pending recording are both gone, so the true net push depth
+			// is zero — reset the counters that track it. present() already does exactly
+			// this when IT wipes the visible list (see the comment there about a frame ending
+			// mid-push charging its depth to every later frame until a false stack overflow
+			// fires); this is the same wipe by a different route. DeltaApplier builds a fresh
+			// SceneCanvas whose own depth restarts at 0, so leaving these alone would let the
+			// two diverge — and pushDepth is persisted, so the drift would survive a save.
+			pushDepth = 0;
+			publishedTailDepth = 0;
+			lastResizeTick = now;
+			// Push the new size to the bound screen NOW rather than waiting for the policy
+			// tick to re-push it. That backstop runs every 20 ticks, so screen.getResolution()
+			// would contradict gpu.getResolution() for up to a second after every resize.
+			// sceneId and driverAddress are unchanged, so this only refreshes the volatile
+			// pair — it triggers no markDirty and no packet from this machine thread.
+			if (boundScreen != null && node != null && node.address() != null) {
+				boundScreen.bindScene(node.address(), scene.sceneId, w, h);
+			}
+			chunkDirty = true;
+			return new Object[] { true };
+		}
 	}
 
 	// Screen binding. NOT direct: these walk the node network, which is not thread-safe off
@@ -1255,7 +1414,8 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 			bindingIsExplicit = true;
 			chunkDirty = true;
 			if (scene != null) {
-				screen.bindScene(node.address(), scene.sceneId);
+				int[] size = resolutionLocked();
+				screen.bindScene(node.address(), scene.sceneId, size[0], size[1]);
 			}
 		}
 		return new Object[] { true };

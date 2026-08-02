@@ -86,8 +86,24 @@ public final class InputRouter {
 			case MessageCodec.INPUT_POINTER_DOWN:
 			case MessageCodec.INPUT_POINTER_MOVE:
 			case MessageCodec.INPUT_POINTER_UP: {
-				if (!inBounds(input.a, input.b, sceneWidth, sceneHeight))
-					return false;
+				int px = input.a, py = input.b;
+				if (!inBounds(px, py, sceneWidth, sceneHeight)) {
+					// A RELEASE is CLAMPED, never dropped — the same reasoning as the
+					// rate-limit exemption above, which this check silently undid: returning
+					// here skips the activePointer.remove() below, so Lua sees a press that
+					// never ends and the next press reuses the stale slot.
+					//
+					// Out-of-bounds became reachable when the scene size stopped being a
+					// constant. The server applies setResolution the instant Lua calls it (a
+					// direct callback), while the client keeps mapping clicks through the old
+					// size until the batch is sealed, shipped, and rendered — a window of a
+					// tick plus latency plus a frame, easily long enough to release in.
+					if (!isRelease) {
+						return false;
+					}
+					px = Math.max(0, Math.min(sceneWidth - 1, px));
+					py = Math.max(0, Math.min(sceneHeight - 1, py));
+				}
 				if (input.c < 0 || input.c > 2)
 					return false; // left/right/middle only
 				// Keyed per BUTTON, not just per watcher: a second button pressed during a
@@ -116,7 +132,7 @@ public final class InputRouter {
 				String name = input.kind == MessageCodec.INPUT_POINTER_DOWN ? "monitor_down"
 						: input.kind == MessageCodec.INPUT_POINTER_MOVE ? "monitor_move" : "monitor_up";
 				node.sendToReachable("computer.checked_signal", player, name,
-						Integer.valueOf(input.a), Integer.valueOf(input.b),
+						Integer.valueOf(px), Integer.valueOf(py),
 						Integer.valueOf(input.c), Integer.valueOf(pointerId));
 				return true;
 			}

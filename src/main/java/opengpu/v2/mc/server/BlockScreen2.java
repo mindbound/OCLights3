@@ -68,20 +68,31 @@ public class BlockScreen2 extends BlockContainer {
 		if (origin == null || origin.sceneId() == null) {
 			return false;
 		}
-		int[] logical = wallHitToLogical(screen, origin, side, hitX, hitY, hitZ);
-		if (logical == null) {
-			return false; // the letterbox bars are not part of the image
-		}
-		// The predicate above is evaluated identically on both sides — sceneId comes from the
-		// description packet and facing from synced metadata — so the return value matches.
-		// Returning different values per side makes the client predict a block placement the
-		// server rejects, which shows up as a ghost block on every right-click.
+		// THE RETURN VALUE IS DELIBERATELY SIZE-INDEPENDENT.
+		//
+		// It is decided by facing and by "this wall shows a scene" — both of which reach the
+		// client through the description packet and synced metadata, so both sides agree.
+		// The letterbox fit is NOT consulted, because it depends on the canvas resolution,
+		// and that reaches the two sides by different routes with no ordering between them:
+		// the client reads its scene mirror (the mod's own packet channel), the server reads
+		// the GPU's scene. Any predicate consulting it disagrees across that window, and a
+		// disagreement here makes the client predict a block placement the server rejects —
+		// the ghost block this method has already shipped twice.
+		//
+		// So a click on a letterbox bar is still "handled": it emits no signal, but it does
+		// not place a block either. That is also the better feel — the wall is a solid
+		// interactive surface, not one with dead margins that build blocks.
 		if (!world.isRemote) {
 			TileEntityGpu2 gpu = V2ServerRuntime.get().gpuForScene(origin.sceneId());
 			if (gpu != null) {
-				// Signals name the ORIGIN, so a program sees one surface address for the
-				// whole wall regardless of which tile the player happened to hit.
-				gpu.onSurfaceClick(player, origin, logical[0], logical[1], 0);
+				int[] size = gpu.resolution();
+				int[] logical = wallHitToLogical(screen, origin, side, hitX, hitY, hitZ,
+						size[0], size[1]);
+				if (logical != null) {
+					// Signals name the ORIGIN, so a program sees one surface address for the
+					// whole wall regardless of which tile the player happened to hit.
+					gpu.onSurfaceClick(player, origin, logical[0], logical[1], 0);
+				}
 			}
 		}
 		return true;
@@ -96,14 +107,11 @@ public class BlockScreen2 extends BlockContainer {
 	 * inverse mappings were separate transcriptions of the same arithmetic.
 	 */
 	private static int[] wallHitToLogical(TileEntityScreen2 hit, TileEntityScreen2 origin,
-			int side, float hitX, float hitY, float hitZ) {
-		// CONSTRAINT: the renderer fits against the LIVE canvas size (SceneRenderer.sizeFor)
-		// while this assumes the default. They agree only because ensureImplicitCanvas() is
-		// the sole caller of createCanvas() and always asks for DEFAULT_WIDTH x
-		// DEFAULT_HEIGHT. A resolution control has to plumb the real size to BOTH — the
-		// shared fit removes the arithmetic as a divergence risk, not this input.
-		SurfaceFit fit = SurfaceFit.of(origin.wallWidth(), origin.wallHeight(),
-				TileEntityGpu2.DEFAULT_WIDTH, TileEntityGpu2.DEFAULT_HEIGHT);
+			int side, float hitX, float hitY, float hitZ, int sceneW, int sceneH) {
+		// The size is passed in, from the GPU's live canvas — the same number the renderer
+		// letterboxes against. It used to be hardcoded to the defaults, which agreed with
+		// the renderer only because nothing could change the resolution.
+		SurfaceFit fit = SurfaceFit.of(origin.wallWidth(), origin.wallHeight(), sceneW, sceneH);
 		// Position across the whole wall, in tiles, from its bottom-left as the viewer sees it.
 		return fit.toLogical(hit.wallCol() + faceU(side, hitX, hitZ), hit.wallRow() + hitY);
 	}
