@@ -113,6 +113,11 @@ public final class V2ServerRuntime {
 		}
 	}
 
+	/** The GPU driving a scene, or null when its chunk is not loaded. */
+	public TileEntityGpu2 gpuForScene(String sceneId) {
+		return hostsByScene.get(sceneId);
+	}
+
 	/** True if a live TE currently drives this scene id (guards blind store deletes). */
 	public boolean isSceneOwned(String sceneId) {
 		TileEntityGpu2 te = hostsByScene.get(sceneId);
@@ -173,6 +178,17 @@ public final class V2ServerRuntime {
 				TileEntityGpu2 te = hostsByScene.get(req.sceneId);
 				if (te != null) {
 					te.onResourceRequest(senderUuid, req.epoch, req.resId);
+				}
+				break;
+			}
+			case MessageCodec.MSG_INPUT: {
+				MessageCodec.Input input = MessageCodec.decodeInput(payload);
+				TileEntityGpu2 te = hostsByScene.get(input.sceneId);
+				if (te != null) {
+					EntityPlayer player = findPlayer(senderUuid);
+					if (player != null) {
+						te.onInput(senderUuid, player, input);
+					}
 				}
 				break;
 			}

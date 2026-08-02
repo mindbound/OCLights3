@@ -16,6 +16,7 @@ import opengpu.v2.mc.net.V2Inbox;
 import opengpu.v2.mc.net.V2Net;
 import opengpu.v2.protocol.CodecException;
 import opengpu.v2.protocol.FrameChunker;
+import opengpu.v2.protocol.MessageCodec;
 import opengpu.v2.sync.ClientTransport;
 import opengpu.v2.sync.MirrorClient;
 
@@ -34,7 +35,8 @@ public final class V2ClientRuntime {
 
 	private static final V2ClientRuntime INSTANCE = new V2ClientRuntime();
 
-	private final MirrorClient mirrorClient = new MirrorClient(new FmlClientTransport(), RESYNC_RETRY_TICKS);
+	private final ClientTransport transport = new FmlClientTransport();
+	private final MirrorClient mirrorClient = new MirrorClient(transport, RESYNC_RETRY_TICKS);
 	private final FrameChunker.Reassembler reassembler = new FrameChunker.Reassembler();
 	private final SceneRenderer renderer = new SceneRenderer();
 
@@ -68,6 +70,24 @@ public final class V2ClientRuntime {
 
 	public SceneRenderer renderer() {
 		return renderer;
+	}
+
+	/**
+	 * Send one input event for a scene. The caller has already mapped screen pixels to
+	 * LOGICAL scene coordinates — the coordinate contract is that everything the server and
+	 * Lua ever see is logical, so surfaces do the un-letterboxing.
+	 */
+	public void sendInput(String sceneId, byte kind, int a, int b, int c) {
+		if (sceneId == null || !mirrorClient.hasMirror(sceneId)) {
+			return;
+		}
+		int epoch = mirrorClient.mirror(sceneId).knownEpoch();
+		if (epoch == 0) {
+			return; // nothing synced yet: the server would reject it anyway
+		}
+		byte[] payload = MessageCodec.encodeInput(
+				new MessageCodec.Input(sceneId, epoch, kind, a, b, c));
+		transport.sendToServer(MessageCodec.envelope(MessageCodec.MSG_INPUT, payload));
 	}
 
 	/** Called by any surface (GUI, TESR, item) that wants this scene rendered. */

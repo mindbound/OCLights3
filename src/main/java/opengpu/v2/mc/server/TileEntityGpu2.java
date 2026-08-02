@@ -12,6 +12,7 @@ import li.cil.oc.api.network.Environment;
 import li.cil.oc.api.network.Message;
 import li.cil.oc.api.network.Node;
 import li.cil.oc.api.network.Visibility;
+import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.network.NetworkManager;
 import net.minecraft.network.Packet;
@@ -20,6 +21,7 @@ import net.minecraft.tileentity.TileEntity;
 import opengpu.OpenGPU;
 import opengpu.v2.mc.FontMetrics;
 import opengpu.v2.persist.DirectoryResourceStore;
+import opengpu.v2.protocol.MessageCodec;
 import opengpu.v2.persist.ScenePersistence;
 import opengpu.v2.protocol.V2Wire;
 import opengpu.v2.scene.CanvasCommand;
@@ -98,6 +100,8 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 	 * threads; OC solves this the same way (mutator -> markChanged -> deferred to the tick).
 	 */
 	private boolean chunkDirty;
+
+	private final InputRouter inputRouter = new InputRouter();
 
 	/**
 	 * Interim component name. The legacy TE still registers "ocl_gpu" with an incompatible
@@ -268,6 +272,7 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 			if (scene == null || host == null) {
 				return;
 			}
+			inputRouter.beginTick(tick);
 			flushRecordingLocked();
 			if (chunkDirty) {
 				chunkDirty = false;
@@ -474,6 +479,69 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 			if (host != null) {
 				host.evictWatcher(watcherUuid);
 			}
+			inputRouter.evictWatcher(watcherUuid);
+		}
+	}
+
+	/**
+	 * Player input aimed at this GPU's scene. Rejected unless the sender is a current
+	 * watcher and names the live incarnation — a client must not be able to drive a scene
+	 * it cannot see, nor one that has since been replaced.
+	 */
+	public void onInput(String watcherUuid, EntityPlayer player, MessageCodec.Input input) {
+		synchronized (sceneLock) {
+			if (scene == null || host == null) {
+				return;
+			}
+			if (!host.isSubscribed(watcherUuid) || input.epoch != scene.epoch()) {
+				return;
+			}
+			TileEntityScreen2 screen = boundScreen;
+			if (screen == null || screen.isInvalid()) {
+				return; // no surface: nothing for the signal's address to be
+			}
+			// REACH CHECK, separate from the render subscription. Subscription answers "who
+			// gets pixels" and is deliberately generous (64 blocks, no line of sight, no
+			// opt-in); it must never double as "who may inject signals into these machines".
+			// Without this, any player who merely walks within render range can flood every
+			// computer on a stranger's network. OC's own screen gates mouse input on
+			// isUseableByPlayer (8 blocks) before it sends anything, and canInteract is NOT
+			// a substitute — it returns true for everyone until a machine has explicit users.
+			if (!withinReach(player, screen)) {
+				return;
+			}
+			inputRouter.route(input, watcherUuid, player, screen, DEFAULT_WIDTH, DEFAULT_HEIGHT);
+		}
+	}
+
+	/** Vanilla's interaction distance, squared — the same bound OC uses for screen input. */
+	private static final double REACH_SQ = 64.0;
+
+	private static boolean withinReach(EntityPlayer player, TileEntityScreen2 screen) {
+		if (player.worldObj != screen.getWorldObj()) {
+			return false;
+		}
+		return player.getDistanceSq(screen.xCoord + 0.5, screen.yCoord + 0.5, screen.zCoord + 0.5)
+				<= REACH_SQ;
+	}
+
+	/**
+	 * An in-world click on the bound screen: synthesized as a press/release pair so Lua sees
+	 * a complete gesture. Real in-world dragging needs continuous client-side raytracing and
+	 * is deliberately not faked here.
+	 */
+	public void onSurfaceClick(EntityPlayer player, TileEntityScreen2 screen, int x, int y, int button) {
+		synchronized (sceneLock) {
+			if (scene == null) {
+				return;
+			}
+			String key = player.getUniqueID().toString();
+			inputRouter.route(new MessageCodec.Input(scene.sceneId, scene.epoch(),
+					MessageCodec.INPUT_POINTER_DOWN, x, y, button), key, player, screen,
+					DEFAULT_WIDTH, DEFAULT_HEIGHT);
+			inputRouter.route(new MessageCodec.Input(scene.sceneId, scene.epoch(),
+					MessageCodec.INPUT_POINTER_UP, x, y, button), key, player, screen,
+					DEFAULT_WIDTH, DEFAULT_HEIGHT);
 		}
 	}
 

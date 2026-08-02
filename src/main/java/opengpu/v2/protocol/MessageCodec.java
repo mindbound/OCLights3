@@ -29,6 +29,82 @@ public final class MessageCodec {
 	public static final byte MSG_RESOURCE_BODY = 6;
 	/** Scene destroyed / not served: mirrors evict on receipt (otherwise indistinguishable from loss). */
 	public static final byte MSG_SCENE_GONE = 7;
+	/** C-&gt;S player input against a surface. */
+	public static final byte MSG_INPUT = 8;
+
+	// Input kinds.
+	public static final byte INPUT_POINTER_DOWN = 1;
+	public static final byte INPUT_POINTER_MOVE = 2;
+	public static final byte INPUT_POINTER_UP = 3;
+	public static final byte INPUT_SCROLL = 4;
+	public static final byte INPUT_KEY_DOWN = 5;
+	public static final byte INPUT_KEY_UP = 6;
+
+	public static boolean isPointerInput(byte kind) {
+		return kind == INPUT_POINTER_DOWN || kind == INPUT_POINTER_MOVE || kind == INPUT_POINTER_UP;
+	}
+
+	/**
+	 * One player input event. Deliberately carries NO surface address and NO player name: the
+	 * server resolves the surface from the scene binding it already owns, so a client cannot
+	 * name a surface it does not have, and identity travels as an opaque server-assigned
+	 * pointerId rather than a username.
+	 *
+	 * Field meaning depends on {@code kind}: pointer/scroll use (x, y, button-or-delta);
+	 * keys use (char, code, 0).
+	 */
+	public static final class Input {
+		public final String sceneId;
+		public final int epoch;
+		public final byte kind;
+		public final int a;
+		public final int b;
+		public final int c;
+
+		public Input(String sceneId, int epoch, byte kind, int a, int b, int c) {
+			this.sceneId = sceneId;
+			this.epoch = epoch;
+			this.kind = kind;
+			this.a = a;
+			this.b = b;
+			this.c = c;
+		}
+	}
+
+	public static byte[] encodeInput(Input input) {
+		ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+		DataOutputStream out = new DataOutputStream(bytes);
+		try {
+			out.writeShort(V2Wire.PROTOCOL_VERSION);
+			out.writeUTF(input.sceneId);
+			out.writeInt(input.epoch);
+			out.writeByte(input.kind);
+			out.writeInt(input.a);
+			out.writeInt(input.b);
+			out.writeInt(input.c);
+		} catch (IOException e) {
+			throw new RuntimeException(e);
+		}
+		return bytes.toByteArray();
+	}
+
+	public static Input decodeInput(byte[] data) throws CodecException {
+		DataInputStream in = open(data);
+		try {
+			String sceneId = in.readUTF();
+			int epoch = in.readInt();
+			if (epoch == 0)
+				throw new CodecException("Epoch 0 is reserved");
+			byte kind = in.readByte();
+			if (kind < INPUT_POINTER_DOWN || kind > INPUT_KEY_UP)
+				throw new CodecException("Unknown input kind " + kind);
+			Input input = new Input(sceneId, epoch, kind, in.readInt(), in.readInt(), in.readInt());
+			expectEnd(in);
+			return input;
+		} catch (IOException e) {
+			throw wrap(e);
+		}
+	}
 
 	/** Max texture body: MAX_TEXTURE_DIM^2 * 4 bytes RGBA. */
 	public static final long MAX_RESOURCE_BODY = (long) V2Wire.MAX_TEXTURE_DIM * V2Wire.MAX_TEXTURE_DIM * 4L;
@@ -102,7 +178,7 @@ public final class MessageCodec {
 		if (envelope.length < 1)
 			throw new CodecException("Empty envelope");
 		byte kind = envelope[0];
-		if (kind < MSG_BATCH || kind > MSG_SCENE_GONE)
+		if (kind < MSG_BATCH || kind > MSG_INPUT)
 			throw new CodecException("Unknown message kind " + kind);
 		return kind;
 	}

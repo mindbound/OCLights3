@@ -5,6 +5,7 @@ import net.minecraft.client.gui.GuiScreen;
 import org.lwjgl.opengl.GL11;
 
 import opengpu.v2.mc.server.TileEntityGpu2;
+import opengpu.v2.protocol.MessageCodec;
 
 /**
  * The Stage A development surface: a GUI that shows a GPU's scene texture. It draws only
@@ -17,6 +18,157 @@ public class GuiScene extends GuiScreen {
 
 	public GuiScene(TileEntityGpu2 gpu) {
 		this.gpu = gpu;
+	}
+
+	// Geometry of the last drawn frame, so input can be mapped back through the letterbox.
+	private int drawX, drawY, drawW, drawH;
+	private boolean drawnThisFrame;
+	/** Which buttons are held, indexed by button id — a drag may use more than one. */
+	private final boolean[] pressed = new boolean[3];
+
+	/**
+	 * Screen pixels to LOGICAL scene coordinates, or null when the click missed the image.
+	 * The scene is letterboxed into the GUI, so the inverse of that mapping lives here —
+	 * the server and Lua only ever see logical coordinates.
+	 */
+	private int[] toLogical(int mouseX, int mouseY) {
+		// Never map against a rect from an older frame: if the last draw bailed out (texture
+		// not ready yet), the stored rect describes an image that is not on screen.
+		if (!drawnThisFrame || drawW <= 0 || drawH <= 0) {
+			return null;
+		}
+		int[] size = sceneSize();
+		if (size == null) {
+			return null;
+		}
+		if (mouseX < drawX || mouseY < drawY || mouseX >= drawX + drawW || mouseY >= drawY + drawH) {
+			return null;
+		}
+		int lx = (int) ((double) (mouseX - drawX) / drawW * size[0]);
+		int ly = (int) ((double) (mouseY - drawY) / drawH * size[1]);
+		return new int[] { Math.max(0, Math.min(size[0] - 1, lx)),
+				Math.max(0, Math.min(size[1] - 1, ly)) };
+	}
+
+	private int[] sceneSize() {
+		String sceneId = gpu.clientSceneId();
+		return sceneId == null ? null : V2ClientRuntime.get().renderer().sizeFor(sceneId);
+	}
+
+	@Override
+	protected void mouseClicked(int mouseX, int mouseY, int button) {
+		super.mouseClicked(mouseX, mouseY, button);
+		int[] logical = toLogical(mouseX, mouseY);
+		if (logical != null && button >= 0 && button < pressed.length) {
+			pressed[button] = true;
+			V2ClientRuntime.get().sendInput(gpu.clientSceneId(),
+					MessageCodec.INPUT_POINTER_DOWN, logical[0], logical[1], button);
+		}
+	}
+
+	@Override
+	protected void mouseClickMove(int mouseX, int mouseY, int button, long heldMillis) {
+		super.mouseClickMove(mouseX, mouseY, button, heldMillis);
+		if (button < 0 || button >= pressed.length || !pressed[button]) {
+			return; // a drag whose press landed outside the image is not ours
+		}
+		int[] logical = toLogical(mouseX, mouseY);
+		if (logical != null) {
+			V2ClientRuntime.get().sendInput(gpu.clientSceneId(),
+					MessageCodec.INPUT_POINTER_MOVE, logical[0], logical[1], button);
+		}
+	}
+
+	@Override
+	protected void mouseMovedOrUp(int mouseX, int mouseY, int state) {
+		super.mouseMovedOrUp(mouseX, mouseY, state);
+		// state == -1 is a move with no button held; only a real release ends the gesture.
+		if (state >= 0 && state < pressed.length && pressed[state]) {
+			pressed[state] = false;
+			int[] logical = toLogical(mouseX, mouseY);
+			// Release outside the image still ends the press, clamped to the edge, so Lua
+			// never sees a gesture that began and never finished.
+			int[] target = logical != null ? logical : clampToEdge(mouseX, mouseY);
+			if (target != null) {
+				V2ClientRuntime.get().sendInput(gpu.clientSceneId(),
+						MessageCodec.INPUT_POINTER_UP, target[0], target[1], state);
+			}
+		}
+	}
+
+	/**
+	 * Closing the GUI mid-drag must still end the gesture. Otherwise the server keeps the
+	 * press slot allocated, Lua sees a button that is held forever, and the next press
+	 * cannot start cleanly.
+	 */
+	@Override
+	public void onGuiClosed() {
+		super.onGuiClosed();
+		for (int button = 0; button < pressed.length; button++) {
+			if (pressed[button]) {
+				pressed[button] = false;
+				V2ClientRuntime.get().sendInput(gpu.clientSceneId(),
+						MessageCodec.INPUT_POINTER_UP, 0, 0, button);
+			}
+		}
+	}
+
+	/**
+	 * Key RELEASE. GuiScreen only routes presses to keyTyped, so a release has to be read
+	 * from the LWJGL event directly — without this, monitor_key_up has no producer at all
+	 * and any program waiting on it hangs.
+	 */
+	@Override
+	public void handleKeyboardInput() {
+		super.handleKeyboardInput();
+		if (!org.lwjgl.input.Keyboard.getEventKeyState()) {
+			int keyCode = org.lwjgl.input.Keyboard.getEventKey();
+			char typedChar = org.lwjgl.input.Keyboard.getEventCharacter();
+			if (keyCode != org.lwjgl.input.Keyboard.KEY_ESCAPE) {
+				V2ClientRuntime.get().sendInput(gpu.clientSceneId(),
+						MessageCodec.INPUT_KEY_UP, typedChar, keyCode, 0);
+			}
+		}
+	}
+
+	private int[] clampToEdge(int mouseX, int mouseY) {
+		int[] size = sceneSize();
+		if (size == null || drawW <= 0) {
+			return null;
+		}
+		int lx = (int) ((double) (mouseX - drawX) / drawW * size[0]);
+		int ly = (int) ((double) (mouseY - drawY) / drawH * size[1]);
+		return new int[] { Math.max(0, Math.min(size[0] - 1, lx)),
+				Math.max(0, Math.min(size[1] - 1, ly)) };
+	}
+
+	@Override
+	public void handleMouseInput() {
+		super.handleMouseInput();
+		int wheel = org.lwjgl.input.Mouse.getEventDWheel();
+		if (wheel == 0) {
+			return;
+		}
+		int mouseX = org.lwjgl.input.Mouse.getEventX() * width / mc.displayWidth;
+		int mouseY = height - org.lwjgl.input.Mouse.getEventY() * height / mc.displayHeight - 1;
+		int[] logical = toLogical(mouseX, mouseY);
+		if (logical != null) {
+			// One notch per event: the server refuses anything else, so a fast wheel
+			// produces several events rather than one amplified one.
+			V2ClientRuntime.get().sendInput(gpu.clientSceneId(), MessageCodec.INPUT_SCROLL,
+					logical[0], logical[1], wheel > 0 ? 1 : -1);
+		}
+	}
+
+	@Override
+	protected void keyTyped(char typedChar, int keyCode) {
+		// ESC still closes the GUI; everything else goes to the scene.
+		if (keyCode == org.lwjgl.input.Keyboard.KEY_ESCAPE) {
+			super.keyTyped(typedChar, keyCode);
+			return;
+		}
+		V2ClientRuntime.get().sendInput(gpu.clientSceneId(), MessageCodec.INPUT_KEY_DOWN,
+				typedChar, keyCode, 0);
 	}
 
 	@Override
@@ -35,6 +187,7 @@ public class GuiScene extends GuiScreen {
 		int texture = sceneId != null ? runtime.renderer().colorTextureFor(sceneId) : -1;
 		int[] size = sceneId != null ? runtime.renderer().sizeFor(sceneId) : null;
 		if (texture == -1 || size == null) {
+			drawnThisFrame = false;
 			String status = sceneId == null ? "GPU is initializing..." : "Awaiting scene sync...";
 			drawCenteredString(fontRendererObj, status, width / 2, height / 2, 0xFFFFFF);
 			super.drawScreen(mouseX, mouseY, partialTicks);
@@ -48,6 +201,13 @@ public class GuiScene extends GuiScreen {
 		int drawH = (int) (size[1] * scale);
 		int x0 = (width - drawW) / 2;
 		int y0 = (height - drawH) / 2;
+		// Remembered for input mapping: the inverse of this letterbox is how a click becomes
+		// a logical coordinate.
+		this.drawX = x0;
+		this.drawY = y0;
+		this.drawW = drawW;
+		this.drawH = drawH;
+		this.drawnThisFrame = true;
 
 		GL11.glBindTexture(GL11.GL_TEXTURE_2D, texture);
 		GL11.glEnable(GL11.GL_TEXTURE_2D);
