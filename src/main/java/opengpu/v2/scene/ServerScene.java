@@ -25,7 +25,18 @@ public final class ServerScene {
 	private final SceneState state;
 	private int seq;
 	private long currentTick;
+	/** Admission allowance consumed this TICK; reset on a tick-value change. */
 	private int tickWriteBytes;
+	/**
+	 * Texture-write payload staged into the CURRENT UNSEALED BATCH; reset at seal.
+	 *
+	 * Deliberately separate from {@link #tickWriteBytes}: the two coincide in the common
+	 * path but diverge whenever a tick boundary passes without a seal, or a seal happens
+	 * without a tick change (saveBoundary does exactly that). One counter cannot bound both,
+	 * and it is the BATCH bound that the decoder enforces — so conflating them produces
+	 * batches the receiver must reject.
+	 */
+	private int stagedWriteBytes;
 	private int writeBudgetBytes = V2Wire.MAX_WRITE_BYTES_PER_TICK;
 	private int manifestGen;
 	private final ArrayList<Delta> staged = new ArrayList<Delta>();
@@ -172,13 +183,22 @@ public final class ServerScene {
 			throw new IllegalStateException("Texture version space exhausted; free and recreate it");
 		if (tickWriteBytes + len > writeBudgetBytes)
 			throw new IllegalStateException("Per-tick texture write allowance exhausted");
+		// The batch bound is what the decoder checks, so it must hold independently of the
+		// tick allowance — a batch spanning a tick boundary would otherwise be rejected by
+		// every receiver, costing the whole frame and a resync.
+		if (stagedWriteBytes + len > V2Wire.MAX_WRITE_BYTES_PER_TICK)
+			throw new IllegalStateException("Batch texture write payload exhausted");
 		tickWriteBytes += (int) len;
+		stagedWriteBytes += (int) len;
 		applyAndStage(new Delta.TextureWrite(resId, res.latestVersion + 1, x, y, w, h, data));
 	}
 
 	/** Bytes of texture-write payload still admissible this tick. */
 	public int writeBudgetRemaining() {
-		return Math.max(0, writeBudgetBytes - tickWriteBytes);
+		// The tighter of the two bounds: a caller pacing itself by this number must never be
+		// refused by the other one.
+		return Math.max(0, Math.min(writeBudgetBytes - tickWriteBytes,
+				V2Wire.MAX_WRITE_BYTES_PER_TICK - stagedWriteBytes));
 	}
 
 	private static void validateDimensions(int width, int height) {
@@ -259,6 +279,7 @@ public final class ServerScene {
 		seq++;
 		SceneBatch batch = new SceneBatch(sceneId, epoch, seq, currentTick, staged);
 		staged.clear();
+		stagedWriteBytes = 0;
 		return batch;
 	}
 

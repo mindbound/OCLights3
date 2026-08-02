@@ -113,7 +113,10 @@ public class TextureStreamingTest {
 			fail("expected the per-tick allowance to be exhausted");
 		} catch (IllegalStateException expected) {
 		}
-		// A new tick grants a fresh allowance.
+		// A new tick grants a fresh allowance — but only once the batch has been sealed, as
+		// the real tick loop does. Capacity is the tighter of the two bounds, so an unsealed
+		// batch still holds the line (see aBatchSpanningTickBoundariesStaysWithinTheDecoderCap).
+		rig.server.sealBatch();
 		rig.server.beginTick(3, V2Wire.MAX_WRITE_BYTES_PER_TICK);
 		assertEquals(V2Wire.MAX_WRITE_BYTES_PER_TICK, rig.server.writeBudgetRemaining());
 		rig.server.writeRegion(rig.texture, 0, 0, 1, 1, new byte[4]);
@@ -197,6 +200,37 @@ public class TextureStreamingTest {
 		// version and latestVersion must stay in step: advancing latestVersion past a
 		// refused write is what would freeze the resource permanently.
 		assertEquals(latestBefore, mirrored.latestVersion);
+	}
+
+	/**
+	 * Regression: observed in game as "Batch texture-write payload over the per-tick cap:
+	 * 17408" on the client.
+	 *
+	 * The per-tick admission allowance and the per-batch payload are different bounds. They
+	 * coincide in the common path, but a tick boundary that passes without a seal lets a
+	 * single batch accumulate more than one tick's worth — and the decoder rejects it, so
+	 * the whole frame is lost and the mirror resyncs.
+	 */
+	@Test
+	public void aBatchSpanningTickBoundariesStaysWithinTheDecoderCap() throws Exception {
+		Rig rig = new Rig();
+		// Two full tick allowances spent with no seal in between.
+		rig.server.beginTick(2, V2Wire.MAX_WRITE_BYTES_PER_TICK);
+		for (int i = 0; i < 16; i++) {
+			rig.server.writeRegion(rig.texture, 0, 0, 16, 16, new byte[16 * 16 * 4]);
+		}
+		rig.server.beginTick(3, V2Wire.MAX_WRITE_BYTES_PER_TICK);
+		try {
+			rig.server.writeRegion(rig.texture, 0, 0, 16, 16, new byte[16 * 16 * 4]);
+			fail("the batch bound must hold even with a fresh tick allowance");
+		} catch (IllegalStateException expected) {
+		}
+		// Whatever was admitted must still decode: the producer can never build a batch the
+		// receiver refuses.
+		SceneBatch batch = rig.server.sealBatch();
+		BatchCodec.decode(BatchCodec.encode(batch));
+		// After the seal the batch bound is clear again, and the tick allowance still governs.
+		rig.server.writeRegion(rig.texture, 0, 0, 16, 16, new byte[16 * 16 * 4]);
 	}
 
 	@Test
