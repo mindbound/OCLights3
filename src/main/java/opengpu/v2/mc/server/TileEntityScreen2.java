@@ -67,6 +67,8 @@ public class TileEntityScreen2 extends TileEntity implements Environment {
 	/** This tile's position within the wall, 0-based from the viewer's bottom-left. */
 	private int col, row;
 	private boolean wallDirty = true;
+	/** Set by {@link #applyWall} when this origin's shape changed; drained next tick. */
+	private boolean wallResized;
 	/**
 	 * In-plane neighbour bits as of the last rebuild, or -1 when never scanned. Deliberately
 	 * NOT persisted: -1 after a load forces one rebuild, which is what we want anyway.
@@ -110,6 +112,41 @@ public class TileEntityScreen2 extends TileEntity implements Environment {
 		}
 		TileEntity te = worldObj.getTileEntity(originX, originY, originZ);
 		return te instanceof TileEntityScreen2 ? (TileEntityScreen2) te : null;
+	}
+
+	/**
+	 * Tell listeners this surface changed shape: {@code monitor_wall_resized(address, w, h)},
+	 * in BLOCKS.
+	 *
+	 * Deliberately NOT called {@code monitor_resized}, and deliberately not carrying pixels.
+	 * A reshape does not change the scene's resolution — that belongs to the GPU and is
+	 * untouched here. What changes is the letterbox, i.e. how the unchanged logical space
+	 * maps onto a differently-shaped surface, and the wall's tile dimensions are the new
+	 * information. Naming it after OC's {@code screen_resized} while silently changing the
+	 * units from cells to blocks is exactly the sort of thing that gets read once and
+	 * misremembered forever; the name says wall, and the numbers match {@link #getWallSize}.
+	 *
+	 * Plain {@code computer.signal}, not {@code checked_signal}: there is no player to
+	 * attribute a reshape to, and canInteract has nothing to decide. OC prepends this node's
+	 * address, so listeners can tell which surface changed — the same shape the input
+	 * signals already have.
+	 *
+	 * Only the case where an address SURVIVES and its shape changes is ours. The origin role
+	 * MOVING is already covered by OpenComputers itself and must not be signalled again
+	 * here: applyWall's setVisibility(None) on a demoted tile reaches Component.removeFrom,
+	 * which calls Machine.removeComponent and emits {@code component_removed(address, name)}
+	 * to every computer that could see it; a promoted tile goes the other way through
+	 * addComponent into {@code component_added}. So a merge that displaces an origin already
+	 * tells a program its address is gone, which is the only honest thing to tell it.
+	 */
+	private void emitWallResized() {
+		// Only an origin has a visible component, so only an origin has an address anyone
+		// could be holding. A satellite reaching here would send from a hidden node.
+		if (node == null || node.address() == null || !isOrigin()) {
+			return;
+		}
+		node.sendToReachable("computer.signal", "monitor_wall_resized",
+				Integer.valueOf(wallW), Integer.valueOf(wallH));
 	}
 
 	/** Ask for a rescan on the next tick (placement, break, or orphan sweep). */
@@ -429,6 +466,13 @@ public class TileEntityScreen2 extends TileEntity implements Environment {
 	private void applyWall(int ox, int oy, int oz, int width, int height, int c, int r) {
 		boolean changed = originX != ox || originY != oy || originZ != oz
 				|| wallW != width || wallH != height || col != c || row != r;
+		// A surface that was addressable and stayed addressable, but changed shape, owes its
+		// listeners a signal. Captured before the write; emitted from updateEntity rather
+		// than here, because applyWall runs once per member inside rebuildWall's traversal
+		// and sending into the OC network mid-traversal is not worth the risk. Deferring
+		// also coalesces the several applyWall calls a single reshape produces.
+		boolean resized = isOrigin() && ox == xCoord && oy == yCoord && oz == zCoord
+				&& (wallW != width || wallH != height);
 		originX = ox;
 		originY = oy;
 		originZ = oz;
@@ -461,6 +505,9 @@ public class TileEntityScreen2 extends TileEntity implements Environment {
 			}
 			markDirty();
 			worldObj.markBlockForUpdate(xCoord, yCoord, zCoord);
+		}
+		if (resized) {
+			wallResized = true;
 		}
 	}
 
@@ -536,6 +583,10 @@ public class TileEntityScreen2 extends TileEntity implements Environment {
 		}
 		if (wallDirty) {
 			rebuildWall();
+		}
+		if (wallResized) {
+			wallResized = false;
+			emitWallResized();
 		}
 		if (++reconcileTicks >= RECONCILE_INTERVAL_TICKS) {
 			reconcileTicks = 0;
