@@ -34,6 +34,13 @@ public class ScreenRenderer extends TileEntitySpecialRenderer {
 			return;
 		}
 		TileEntityScreen2 screen = (TileEntityScreen2) tile;
+		// Only the origin draws: it renders the whole wall as ONE quad, which is one draw
+		// call instead of N and needs no per-tile UV sub-rects. Satellites therefore bail
+		// out here — which is what keeps the screen's infinite render bounding box cheap,
+		// since every screen block in the world is dispatched every frame.
+		if (!screen.isOrigin()) {
+			return;
+		}
 		String sceneId = screen.sceneId();
 		if (sceneId == null) {
 			return;
@@ -47,16 +54,19 @@ public class ScreenRenderer extends TileEntitySpecialRenderer {
 		if (texture == -1) {
 			return; // not rendered yet: the block's own face texture shows through
 		}
-		// Letterbox: preserve the scene's aspect inside the square face, so circles stay
-		// circular and a future 16:9 multiblock wall fills edge to edge unchanged.
+		// Letterbox the scene inside the WALL's rectangle, not a single face: a 16:9 scene on
+		// a 16:9 wall now fills it edge to edge, which is the whole point of building one.
+		int wallW = screen.wallWidth();
+		int wallH = screen.wallHeight();
 		int[] size = runtime.renderer().sizeFor(sceneId);
-		double halfW = 0.5, halfH = 0.5;
+		double halfW = wallW * 0.5, halfH = wallH * 0.5;
 		if (size != null && size[0] > 0 && size[1] > 0) {
-			double aspect = (double) size[0] / size[1];
-			if (aspect >= 1.0) {
-				halfH = 0.5 / aspect;
+			double sceneAspect = (double) size[0] / size[1];
+			double wallAspect = (double) wallW / wallH;
+			if (sceneAspect >= wallAspect) {
+				halfH = halfW / sceneAspect; // limited by width
 			} else {
-				halfW = 0.5 * aspect;
+				halfW = halfH * sceneAspect; // limited by height
 			}
 		}
 
@@ -77,7 +87,13 @@ public class ScreenRenderer extends TileEntitySpecialRenderer {
 		GL11.glPushMatrix();
 		GL11.glTranslated(x + 0.5, y + 0.5, z + 0.5);
 		GL11.glRotatef(faceRotation(screen.facing()), 0.0F, 1.0F, 0.0F);
-		GL11.glTranslated(0.0, 0.0, -FACE_OFFSET);
+		// Offset from the ORIGIN TILE to the wall's centre. The origin is sticky, so it is
+		// NOT necessarily the bottom-left corner — growing a wall leftward or downward keeps
+		// the incumbent at a non-zero col/row, and assuming (0,0) draws the image a whole
+		// block off with half of it hanging past the wall's edge. In face-local space the
+		// viewer's right is -X (u = 0 sits at +X in the quad below) and up is +Y.
+		GL11.glTranslated(-((wallW - 1) * 0.5 - screen.wallCol()),
+				(wallH - 1) * 0.5 - screen.wallRow(), -FACE_OFFSET);
 
 		GL11.glDisable(GL11.GL_LIGHTING);
 		GL11.glEnable(GL11.GL_TEXTURE_2D);

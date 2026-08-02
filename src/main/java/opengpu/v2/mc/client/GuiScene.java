@@ -25,6 +25,13 @@ public class GuiScene extends GuiScreen {
 	private boolean drawnThisFrame;
 	/** Which buttons are held, indexed by button id — a drag may use more than one. */
 	private final boolean[] pressed = new boolean[3];
+	/**
+	 * Character typed for each held key code. LWJGL reports '\0' on release, so the char has
+	 * to be remembered from the press — OC's own key_up carries the character, and a program
+	 * matching on it would silently never fire otherwise.
+	 */
+	private final java.util.Map<Integer, Character> heldKeyChars =
+			new java.util.HashMap<Integer, Character>();
 
 	/**
 	 * Screen pixels to LOGICAL scene coordinates, or null when the click missed the image.
@@ -111,6 +118,13 @@ public class GuiScene extends GuiScreen {
 						MessageCodec.INPUT_POINTER_UP, 0, 0, button);
 			}
 		}
+		// Same reasoning for keys: a key held when the GUI closes never sees its release
+		// event, so release them all rather than leave Lua believing they are still down.
+		for (java.util.Map.Entry<Integer, Character> held : heldKeyChars.entrySet()) {
+			V2ClientRuntime.get().sendInput(gpu.clientSceneId(), MessageCodec.INPUT_KEY_UP,
+					held.getValue().charValue(), held.getKey().intValue(), 0);
+		}
+		heldKeyChars.clear();
 	}
 
 	/**
@@ -123,10 +137,10 @@ public class GuiScene extends GuiScreen {
 		super.handleKeyboardInput();
 		if (!org.lwjgl.input.Keyboard.getEventKeyState()) {
 			int keyCode = org.lwjgl.input.Keyboard.getEventKey();
-			char typedChar = org.lwjgl.input.Keyboard.getEventCharacter();
 			if (keyCode != org.lwjgl.input.Keyboard.KEY_ESCAPE) {
-				V2ClientRuntime.get().sendInput(gpu.clientSceneId(),
-						MessageCodec.INPUT_KEY_UP, typedChar, keyCode, 0);
+				Character held = heldKeyChars.remove(Integer.valueOf(keyCode));
+				V2ClientRuntime.get().sendInput(gpu.clientSceneId(), MessageCodec.INPUT_KEY_UP,
+						held == null ? 0 : held.charValue(), keyCode, 0);
 			}
 		}
 	}
@@ -167,6 +181,7 @@ public class GuiScene extends GuiScreen {
 			super.keyTyped(typedChar, keyCode);
 			return;
 		}
+		heldKeyChars.put(Integer.valueOf(keyCode), Character.valueOf(typedChar));
 		V2ClientRuntime.get().sendInput(gpu.clientSceneId(), MessageCodec.INPUT_KEY_DOWN,
 				typedChar, keyCode, 0);
 	}

@@ -322,6 +322,18 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 		if (screen == null || screen.isInvalid()) {
 			return; // merely unloaded: keep the claim — reconcileDriver() agrees
 		}
+		if (!screen.isOrigin()) {
+			// The screen was absorbed into a larger wall and is now a satellite: its
+			// component is invisible and it displays nothing. Holding the binding would
+			// leave the GPU pushing a scene at a tile that cannot show it, with the wall
+			// dark forever. Drop it and let auto-bind find the new origin.
+			OpenGPU.logger.info("GPU " + node.address() + ": screen " + boundScreenAddress
+					+ " became part of a wall; releasing the binding");
+			boundScreen = null;
+			boundScreenAddress = null;
+			chunkDirty = true;
+			return;
+		}
 		String driver = screen.driverAddress();
 		if (driver != null && !driver.equals(node.address())
 				&& node.network().node(driver) != null) {
@@ -353,8 +365,10 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 		for (int[] o : offsets) {
 			TileEntity te = worldObj.getTileEntity(xCoord + o[0], yCoord + o[1], zCoord + o[2]);
 			if (te instanceof TileEntityScreen2) {
-				TileEntityScreen2 screen = (TileEntityScreen2) te;
-				if (screen.node() != null && screen.node().address() != null
+				// Bind the wall's ORIGIN, whichever tile happens to be adjacent: the origin
+				// owns the surface, and a satellite's component is not even visible.
+				TileEntityScreen2 screen = ((TileEntityScreen2) te).origin();
+				if (screen != null && screen.node() != null && screen.node().address() != null
 						&& screenIsAvailable(screen)) {
 					boundScreenAddress = screen.node().address();
 					chunkDirty = true;
@@ -1200,6 +1214,11 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 			throw new Exception("no screen with address " + address);
 		}
 		TileEntityScreen2 screen = (TileEntityScreen2) target.host();
+		if (!screen.isOrigin()) {
+			// Only reachable if a satellite's address were somehow known; the surface is the
+			// wall, and the wall's identity is its origin.
+			throw new Exception("that screen is part of a wall; bind its origin instead");
+		}
 		if (!screenIsAvailable(screen)) {
 			// One driving GPU per surface: the old scene keeps living on its own GPU.
 			throw new Exception("screen is already driven by GPU " + screen.driverAddress());
