@@ -52,6 +52,11 @@ public class TileEntityScreen2 extends TileEntity implements Environment {
 	/** This tile's position within the wall, 0-based from the viewer's bottom-left. */
 	private int col, row;
 	private boolean wallDirty = true;
+	/**
+	 * In-plane neighbour bits as of the last rebuild, or -1 when never scanned. Deliberately
+	 * NOT persisted: -1 after a load forces one rebuild, which is what we want anyway.
+	 */
+	private int neighbourMask = -1;
 
 	public boolean isOrigin() {
 		return originX == xCoord && originY == yCoord && originZ == zCoord;
@@ -92,9 +97,32 @@ public class TileEntityScreen2 extends TileEntity implements Environment {
 		return te instanceof TileEntityScreen2 ? (TileEntityScreen2) te : null;
 	}
 
-	/** Ask for a rescan on the next tick (placement, break, or neighbour change). */
+	/** Ask for a rescan on the next tick (placement, break, or orphan sweep). */
 	public void markWallDirty() {
 		wallDirty = true;
+	}
+
+	/**
+	 * Ask for a rescan only if this tile's own in-plane adjacency actually changed.
+	 *
+	 * A wall's shape is a function of nothing but which coplanar neighbours are same-facing
+	 * screens, so a redstone torch, a piston, flowing water, or any block placed in front of
+	 * or behind the wall cannot reshape it — yet the unfiltered hook re-ran the whole
+	 * flood-fill for every one of them. A 1-tick clock next to a 16x16 wall bought a
+	 * permanent 20 Hz full rescan for the price of two blocks. Four lookups settle it.
+	 *
+	 * Sound because a change is always adjacent to SOME member, and that member sees it: a
+	 * screen added or removed at P flips the adjacency bit of every tile touching P.
+	 */
+	public void markWallDirtyIfShapeCouldChange() {
+		if (worldObj == null || worldObj.isRemote) {
+			return;
+		}
+		int mask = inPlaneNeighbourMask(rightAxis());
+		if (mask != neighbourMask) {
+			neighbourMask = mask;
+			wallDirty = true;
+		}
 	}
 
 	/**
@@ -126,99 +154,130 @@ public class TileEntityScreen2 extends TileEntity implements Environment {
 	/**
 	 * Rebuild this wall's shape.
 	 *
-	 * Walks the coplanar, same-facing neighbours to a bounding rectangle and accepts it only
-	 * when every cell is filled — an L-shape is not a display. The origin is STICKY: if the
-	 * previous origin is still part of the wall it keeps the role, so adding a tile does not
-	 * silently move the surface address that Lua is holding. Otherwise the lowest cell wins,
-	 * deterministically.
+	 * Membership is a property of the GROUP, never of the tile that happens to be scanning.
+	 * That distinction is the entire design. An earlier version derived the rectangle from
+	 * the scanning tile's own row and column runs, and for any non-rectangular group two
+	 * members derived two DIFFERENT, overlapping rectangles and wrote both into the tiles
+	 * they shared — while the apply loop cleared the losers' dirty flags, silencing the
+	 * dissenters before they could object. Breaking one corner off a 2x2 left the opposite
+	 * tile holding an origin whose rectangle excluded it: nothing drew it (the TESR skips a
+	 * non-origin), no computer could see it (its component was left hidden), {@code bind()}
+	 * refused it, and no event remained that could ever revisit it. Only breaking the block
+	 * recovered it.
+	 *
+	 * So: flood-fill the connected, coplanar, same-facing component and accept it only when
+	 * it exactly fills its own bounding box. Every member reaches the same component from
+	 * wherever it starts, so every member computes the same verdict — which is what makes
+	 * applying that verdict to all of them, and clearing their dirty flags, sound rather
+	 * than silencing. Anything else — an L, a T, a ring, a ragged edge — makes every member
+	 * a lone 1x1, which is at least a display the player can see and address.
+	 *
+	 * The origin is STICKY: an incumbent still inside the rectangle keeps the role, so
+	 * growing a wall does not move the address Lua is holding. Two walls merging have two
+	 * incumbents and one must lose; the tie breaks on the lowest cell, so the outcome does
+	 * not depend on tile iteration order. (The GPU follows a displaced origin — see
+	 * TileEntityGpu2.resolveScreenLocked.)
 	 */
 	public void rebuildWall() {
 		wallDirty = false;
 		if (worldObj == null || worldObj.isRemote) {
 			return;
 		}
-		// Remember the current membership so tiles that LEAVE the wall can be rescanned.
-		int[] oldRight = rightAxis();
-		int oldBaseX = xCoord - oldRight[0] * col;
+		int[] right = rightAxis();
+		neighbourMask = inPlaneNeighbourMask(right);
+		// Previous membership, captured before anything is mutated, so tiles that LEAVE can
+		// be rescanned. Reading our own fields is only safe because peers now write the
+		// IDENTICAL rectangle: when they disagreed, a peer's apply destroyed the very
+		// membership this sweep needs and orphans were stranded unreachably.
+		int oldBaseX = xCoord - right[0] * col;
 		int oldBaseY = yCoord - row;
-		int oldBaseZ = zCoord - oldRight[2] * col;
+		int oldBaseZ = zCoord - right[2] * col;
 		int oldW = wallW, oldH = wallH;
 
-		int[] right = rightAxis();
-		// Extent along each axis from this tile. Each direction is scanned independently to
-		// a hard stop; a run LONGER than the span is then refused outright rather than
-		// clamped, because a clamped window depends on which tile did the scanning and two
-		// tiles in the same run would build two different, overlapping walls.
-		int minR = 0, maxR = 0, minU = 0, maxU = 0;
-		int limit = MAX_WALL_SPAN + 1;
-		while (-minR < limit
-				&& screenAt(xCoord + right[0] * (minR - 1), yCoord, zCoord + right[2] * (minR - 1)) != null) {
-			minR--;
-		}
-		while (maxR < limit
-				&& screenAt(xCoord + right[0] * (maxR + 1), yCoord, zCoord + right[2] * (maxR + 1)) != null) {
-			maxR++;
-		}
-		while (-minU < limit && screenAt(xCoord, yCoord + (minU - 1), zCoord) != null) {
-			minU--;
-		}
-		while (maxU < limit && screenAt(xCoord, yCoord + (maxU + 1), zCoord) != null) {
-			maxU++;
-		}
-		int width = maxR - minR + 1;
-		int height = maxU - minU + 1;
-		if (width > MAX_WALL_SPAN || height > MAX_WALL_SPAN) {
-			// Every tile in an over-long run sees an over-long run, so all of them collapse
-			// to 1x1 — a deterministic, if unhelpful, outcome rather than a split-brain wall.
-			width = 1;
-			height = 1;
-			minR = maxR = minU = maxU = 0;
-		}
-		// Every cell must be present, or this is not a rectangle.
-		for (int r = minR; r <= maxR; r++) {
-			for (int u = minU; u <= maxU; u++) {
-				if (screenAt(xCoord + right[0] * r, yCoord + u, zCoord + right[2] * r) == null) {
-					width = 1;
-					height = 1;
-					minR = maxR = minU = maxU = 0;
-					r = maxR + 1;
-					break;
-				}
+		java.util.List<TileEntityScreen2> group = collectGroup(right);
+		int baseX = xCoord, baseY = yCoord, baseZ = zCoord;
+		int width = 1, height = 1;
+		boolean rectangle = false;
+		if (group != null) {
+			int minR = Integer.MAX_VALUE, maxR = Integer.MIN_VALUE;
+			int minU = Integer.MAX_VALUE, maxU = Integer.MIN_VALUE;
+			for (int i = 0; i < group.size(); i++) {
+				TileEntityScreen2 tile = group.get(i);
+				int r = cellR(tile, xCoord, zCoord, right);
+				int u = tile.yCoord - yCoord;
+				if (r < minR) { minR = r; }
+				if (r > maxR) { maxR = r; }
+				if (u < minU) { minU = u; }
+				if (u > maxU) { maxU = u; }
 			}
+			width = maxR - minR + 1;
+			height = maxU - minU + 1;
+			// Exactly filled: a hole anywhere makes the area exceed the member count. Long
+			// arithmetic because width*height is attacker-influenced through the build.
+			rectangle = width <= MAX_WALL_SPAN && height <= MAX_WALL_SPAN
+					&& (long) width * (long) height == group.size();
+			baseX = xCoord + right[0] * minR;
+			baseY = yCoord + minU;
+			baseZ = zCoord + right[2] * minR;
 		}
-		int baseX = xCoord + right[0] * minR;
-		int baseY = yCoord + minU;
-		int baseZ = zCoord + right[2] * minR;
-		// Sticky origin: keep the incumbent if it is still inside the new rectangle.
-		int newOx = baseX, newOy = baseY, newOz = baseZ;
-		TileEntityScreen2 incumbent = screenAt(originX, originY, originZ);
-		if (incumbent != null && withinWall(originX, originY, originZ, baseX, baseY, baseZ,
-				right, width, height)) {
-			newOx = originX;
-			newOy = originY;
-			newOz = originZ;
-		}
-		// Apply to every tile, including this one. Each tile it touches is authoritative
-		// afterwards, so clearing their dirty flags stops all N tiles of a wall each running
-		// their own O(W*H) rebuild for the same event.
-		for (int r = 0; r < width; r++) {
-			for (int u = 0; u < height; u++) {
-				TileEntityScreen2 tile = screenAt(baseX + right[0] * r, baseY + u, baseZ + right[2] * r);
-				if (tile != null) {
-					tile.applyWall(newOx, newOy, newOz, width, height, r, u);
+
+		java.util.Set<Long> members = new java.util.HashSet<Long>();
+		if (!rectangle) {
+			// Demote every member to its own 1x1 HERE, rather than marking them dirty and
+			// hoping they get to it: a member left pointing at an origin that no longer
+			// counts it is exactly the stranded-tile failure above, and by then there is no
+			// event left to recover it. Doing it inline also settles the whole group in one
+			// pass instead of N cascading rebuilds.
+			if (group != null) {
+				for (int i = 0; i < group.size(); i++) {
+					TileEntityScreen2 tile = group.get(i);
+					tile.applyWall(tile.xCoord, tile.yCoord, tile.zCoord, 1, 1, 0, 0);
 					tile.wallDirty = false;
+					members.add(Long.valueOf(packed(tile.xCoord, tile.yCoord, tile.zCoord)));
+				}
+			} else {
+				applyWall(xCoord, yCoord, zCoord, 1, 1, 0, 0);
+				members.add(Long.valueOf(packed(xCoord, yCoord, zCoord)));
+			}
+		} else {
+			// Sticky origin, decided from the GROUP so the answer cannot depend on which tile
+			// rebuilt first. An incumbent is any member that is currently an origin; merging
+			// two walls presents two, and the lowest cell wins.
+			int originR = 0, originU = 0;
+			boolean haveIncumbent = false;
+			for (int i = 0; i < group.size(); i++) {
+				TileEntityScreen2 tile = group.get(i);
+				if (!tile.isOrigin()) {
+					continue;
+				}
+				int r = cellR(tile, baseX, baseZ, right);
+				int u = tile.yCoord - baseY;
+				if (!haveIncumbent || u < originU || (u == originU && r < originR)) {
+					haveIncumbent = true;
+					originR = r;
+					originU = u;
 				}
 			}
+			int newOx = baseX + right[0] * originR;
+			int newOy = baseY + originU;
+			int newOz = baseZ + right[2] * originR;
+			for (int i = 0; i < group.size(); i++) {
+				TileEntityScreen2 tile = group.get(i);
+				tile.applyWall(newOx, newOy, newOz, width, height,
+						cellR(tile, baseX, baseZ, right), tile.yCoord - baseY);
+				tile.wallDirty = false;
+				members.add(Long.valueOf(packed(tile.xCoord, tile.yCoord, tile.zCoord)));
+			}
 		}
-		// Tiles that were in the OLD wall but not the new one are now orphans. Nothing above
-		// touches them, so without this they keep stale geometry, a stale origin and — worst
-		// — an invisible OC component, i.e. a screen that can never be bound again.
+		// Tiles that were in the OLD wall but are not members now are orphans — the wall was
+		// split, or collapsed. Without this they keep stale geometry, a stale origin and an
+		// invisible OC component: a screen that can never be bound again.
 		for (int r = 0; r < oldW; r++) {
 			for (int u = 0; u < oldH; u++) {
-				int tx = oldBaseX + oldRight[0] * r;
+				int tx = oldBaseX + right[0] * r;
 				int ty = oldBaseY + u;
-				int tz = oldBaseZ + oldRight[2] * r;
-				if (withinWall(tx, ty, tz, baseX, baseY, baseZ, right, width, height)) {
+				int tz = oldBaseZ + right[2] * r;
+				if (members.contains(Long.valueOf(packed(tx, ty, tz)))) {
 					continue;
 				}
 				TileEntityScreen2 orphan = screenAt(tx, ty, tz);
@@ -229,24 +288,131 @@ public class TileEntityScreen2 extends TileEntity implements Environment {
 		}
 	}
 
-	private boolean withinWall(int x, int y, int z, int baseX, int baseY, int baseZ,
-			int[] right, int width, int height) {
-		for (int r = 0; r < width; r++) {
-			for (int u = 0; u < height; u++) {
-				if (baseX + right[0] * r == x && baseY + u == y && baseZ + right[2] * r == z) {
-					return true;
-				}
+	/** This tile's column index relative to a base cell, along the viewer's right axis. */
+	private static int cellR(TileEntityScreen2 tile, int baseX, int baseZ, int[] right) {
+		return (tile.xCoord - baseX) * right[0] + (tile.zCoord - baseZ) * right[2];
+	}
+
+	/**
+	 * Every coplanar, same-facing screen connected to this one, or null when the component is
+	 * larger than any legal wall could be. Starting from any member yields the same set,
+	 * which is what lets each tile agree on the wall without consulting its peers' stored
+	 * state — the property the old row/column scan lacked.
+	 */
+	private java.util.List<TileEntityScreen2> collectGroup(int[] right) {
+		java.util.List<TileEntityScreen2> found = new java.util.ArrayList<TileEntityScreen2>();
+		java.util.Set<Long> seen = new java.util.HashSet<Long>();
+		java.util.ArrayDeque<TileEntityScreen2> queue = new java.util.ArrayDeque<TileEntityScreen2>();
+		seen.add(Long.valueOf(packed(xCoord, yCoord, zCoord)));
+		queue.add(this);
+		while (!queue.isEmpty()) {
+			TileEntityScreen2 tile = queue.poll();
+			found.add(tile);
+			if (found.size() > MAX_WALL_CELLS) {
+				// Cannot be a legal rectangle whatever the rest looks like. Stop before the
+				// scan becomes something a player can point at the server thread.
+				return null;
+			}
+			for (int d = -1; d <= 1; d += 2) {
+				enqueue(queue, seen, tile.xCoord + right[0] * d, tile.yCoord,
+						tile.zCoord + right[2] * d);
+				enqueue(queue, seen, tile.xCoord, tile.yCoord + d, tile.zCoord);
 			}
 		}
-		return false;
+		return found;
+	}
+
+	private void enqueue(java.util.ArrayDeque<TileEntityScreen2> queue, java.util.Set<Long> seen,
+			int x, int y, int z) {
+		// Record non-screen positions as seen too, so a wall's boundary is probed once.
+		if (!seen.add(Long.valueOf(packed(x, y, z)))) {
+			return;
+		}
+		TileEntityScreen2 tile = screenAt(x, y, z);
+		if (tile != null) {
+			queue.add(tile);
+		}
+	}
+
+	private static long packed(int x, int y, int z) {
+		return ((long) (x & 0x3FFFFFF) << 38) | ((long) (y & 0xFF) << 30) | (z & 0x3FFFFFFL);
+	}
+
+	/**
+	 * Which of the four in-plane neighbours are same-facing screens. A wall's shape depends
+	 * on nothing else, so comparing this against the last value lets a tile ignore the
+	 * neighbour changes that cannot possibly reshape it.
+	 */
+	private int inPlaneNeighbourMask(int[] right) {
+		int mask = 0;
+		if (screenAt(xCoord + right[0], yCoord, zCoord + right[2]) != null) { mask |= 1; }
+		if (screenAt(xCoord - right[0], yCoord, zCoord - right[2]) != null) { mask |= 2; }
+		if (screenAt(xCoord, yCoord + 1, zCoord) != null) { mask |= 4; }
+		if (screenAt(xCoord, yCoord - 1, zCoord) != null) { mask |= 8; }
+		return mask;
+	}
+
+	/**
+	 * Squared distance from a point to the nearest tile CENTRE of this wall.
+	 *
+	 * Authorization distance has to be derived from the SURFACE, not from the one block that
+	 * happens to hold the component: the origin is sticky and can sit at any corner of a
+	 * wall up to {@link #MAX_WALL_SPAN} tiles across, so measuring from it left the far end
+	 * of a wide wall silently deaf to every GUI event while in-world right-clicks on those
+	 * same tiles kept working — which reads as a broken GUI, not as a range limit.
+	 */
+	public double distanceSqToNearestTile(double px, double py, double pz) {
+		int[] right = rightAxis();
+		int baseX = xCoord - right[0] * col;
+		int baseY = yCoord - row;
+		int baseZ = zCoord - right[2] * col;
+		int farX = baseX + right[0] * (wallW - 1);
+		int farZ = baseZ + right[2] * (wallW - 1);
+		// Axis-aligned rectangle of unit cells, so clamping per axis finds the nearest cell
+		// centre without visiting a single cell.
+		double dx = px - clamp(px, Math.min(baseX, farX) + 0.5, Math.max(baseX, farX) + 0.5);
+		double dy = py - clamp(py, baseY + 0.5, baseY + wallH - 0.5);
+		double dz = pz - clamp(pz, Math.min(baseZ, farZ) + 0.5, Math.max(baseZ, farZ) + 0.5);
+		return dx * dx + dy * dy + dz * dz;
+	}
+
+	private static double clamp(double v, double lo, double hi) {
+		return v < lo ? lo : (v > hi ? hi : v);
 	}
 
 	/** Largest wall span in tiles, so a pathological build cannot scan without bound. */
 	public static final int MAX_WALL_SPAN = 16;
 
+	/** Cells in the largest legal wall — the flood-fill's hard stop. */
+	private static final int MAX_WALL_CELLS = MAX_WALL_SPAN * MAX_WALL_SPAN;
+
+	/**
+	 * Write this tile's membership, and sync only what a client can actually observe.
+	 *
+	 * A SATELLITE's entire client-visible state is one bit. {@link ScreenRenderer} returns at
+	 * {@code !isOrigin()} before reading a single geometry field, and no other client-side
+	 * code reads any of them — so a satellite whose col/row shifted, or whose wall grew, or
+	 * whose origin moved to a different tile, looks identical on screen and needs no packet.
+	 * Sending one anyway is what made a reshape expensive: 1.7.10's PlayerInstance stops
+	 * accumulating individual block changes at 64 flags per chunk and escalates to a full
+	 * S21PacketChunkData for every affected section PLUS a description packet for every tile
+	 * entity in them, so a 16x16 wall turned a seven-int geometry change into two whole
+	 * chunk sections re-serialised to every watching player.
+	 *
+	 * Now only two things reach the wire: an origin whose rendered geometry changed, and any
+	 * tile that crossed the origin/satellite line. A reshape that keeps its membership costs
+	 * one packet, not 256.
+	 *
+	 * IF a client-side caller is ever added that reads a satellite's wallW/wallH/col/row or
+	 * resolves origin() from one, this optimisation becomes a desync and must be revisited —
+	 * chunk load still sends the full state via getDescriptionPacket, so the staleness is
+	 * invisible until something looks.
+	 */
 	private void applyWall(int ox, int oy, int oz, int width, int height, int c, int r) {
 		boolean changed = originX != ox || originY != oy || originZ != oz
 				|| wallW != width || wallH != height || col != c || row != r;
+		boolean wasOrigin = isOrigin();
+		boolean geometryChanged = wallW != width || wallH != height || col != c || row != r;
 		originX = ox;
 		originY = oy;
 		originZ = oz;
@@ -264,11 +430,23 @@ public class TileEntityScreen2 extends TileEntity implements Environment {
 		if (changed) {
 			if (!isOrigin()) {
 				// A satellite shows nothing of its own; the origin covers the whole wall.
+				//
+				// sceneId only — NOT driverAddress. That field is not just display state, it
+				// is the arming condition for the whole break notification: V2ServerRuntime
+				// .onScreenRemoved returns immediately when it is null, so nulling it here
+				// made breaking a demoted tile notify no GPU at all, and the GPU kept a
+				// binding to a node that no longer existed. The window is unbounded — the
+				// GPU only notices a demotion on its 20-tick policy tick, and not at all
+				// while its own chunk is unloaded. Leaving it set is safe because a satellite
+				// is not a bind target either way (bind() refuses one, auto-bind requires an
+				// origin), and reconcileDriver() clears it once the driver stops claiming us.
 				sceneId = null;
-				driverAddress = null;
 			}
+			// Always persist: the save path stores every field, observable or not.
 			markDirty();
-			worldObj.markBlockForUpdate(xCoord, yCoord, zCoord);
+			if (wasOrigin != isOrigin() || (isOrigin() && geometryChanged)) {
+				worldObj.markBlockForUpdate(xCoord, yCoord, zCoord);
+			}
 		}
 	}
 
@@ -399,8 +577,17 @@ public class TileEntityScreen2 extends TileEntity implements Environment {
 		}
 		driverAddress = tag.hasKey("v2driver") ? tag.getString("v2driver") : null;
 		sceneId = tag.hasKey("v2scene") ? tag.getString("v2scene") : null;
+		// Validated, not merely length-checked. These ints come straight back as loop bounds
+		// in rebuildWall's orphan sweep, so a hand-edited region file, an NBT-copying
+		// schematic tool or plain chunk corruption could otherwise hand the server tick
+		// thread a 10^12-iteration loop — and col/row outside the wall would aim the sweep at
+		// unrelated screens hundreds of blocks away. Same reasoning as the push-depth clamp
+		// in TileEntityGpu2.readFromNBT; MAX_WALL_SPAN was enforced on the live scan only.
 		int[] wall = tag.getIntArray("v2wall");
-		if (wall.length == 7) {
+		if (wall.length == 7 && wall[3] >= 1 && wall[3] <= MAX_WALL_SPAN
+				&& wall[4] >= 1 && wall[4] <= MAX_WALL_SPAN
+				&& wall[5] >= 0 && wall[5] < wall[3]
+				&& wall[6] >= 0 && wall[6] < wall[4]) {
 			originX = wall[0];
 			originY = wall[1];
 			originZ = wall[2];
@@ -409,10 +596,15 @@ public class TileEntityScreen2 extends TileEntity implements Environment {
 			col = wall[5];
 			row = wall[6];
 		} else {
-			// Fresh placement or a pre-wall save: a lone screen is its own 1x1 wall.
+			// Fresh placement, a pre-wall save, or a tag we do not trust: a lone screen is
+			// its own 1x1 wall. The rescan below settles the real shape either way.
 			originX = xCoord;
 			originY = yCoord;
 			originZ = zCoord;
+			wallW = 1;
+			wallH = 1;
+			col = 0;
+			row = 0;
 		}
 		// The neighbours may have changed while unloaded, so never trust the saved shape.
 		wallDirty = true;
@@ -433,8 +625,14 @@ public class TileEntityScreen2 extends TileEntity implements Environment {
 	public void onDataPacket(NetworkManager net, S35PacketUpdateTileEntity pkt) {
 		NBTTagCompound tag = pkt.func_148857_g();
 		sceneId = tag.hasKey("sceneId") ? tag.getString("sceneId") : null;
+		// Validated like the save path: wallW/wallH scale the TESR's quad and drive the
+		// letterbox fit, so a bogus value paints a display across the sky rather than merely
+		// desyncing. A rejected packet leaves the tile as a 1x1 until the next update.
 		int[] wall = tag.getIntArray("wall");
-		if (wall.length == 7) {
+		if (wall.length == 7 && wall[3] >= 1 && wall[3] <= MAX_WALL_SPAN
+				&& wall[4] >= 1 && wall[4] <= MAX_WALL_SPAN
+				&& wall[5] >= 0 && wall[5] < wall[3]
+				&& wall[6] >= 0 && wall[6] < wall[4]) {
 			originX = wall[0];
 			originY = wall[1];
 			originZ = wall[2];
@@ -446,7 +644,7 @@ public class TileEntityScreen2 extends TileEntity implements Environment {
 	}
 
 	/**
-	 * The origin's render bounds must cover the WHOLE wall.
+	 * The origin's render bounds must never cull while any part of the wall is in view.
 	 *
 	 * Angelica caches and classifies render bounds per TE class and the base implementation
 	 * is now the block's collision box, so an unoverridden origin frustum-culls the entire

@@ -324,15 +324,28 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 		}
 		if (!screen.isOrigin()) {
 			// The screen was absorbed into a larger wall and is now a satellite: its
-			// component is invisible and it displays nothing. Holding the binding would
-			// leave the GPU pushing a scene at a tile that cannot show it, with the wall
-			// dark forever. Drop it and let auto-bind find the new origin.
+			// component is invisible and it displays nothing, so the binding has to move.
+			//
+			// FOLLOW the wall — do not drop the binding. Dropping it and "letting auto-bind
+			// find the new origin" cannot work: auto-bind runs only when !bindingIsExplicit
+			// (see the head of this method), and bindingIsExplicit is set by bind(), is
+			// persisted, and is never cleared. So for precisely the binding a Lua program
+			// established deliberately, dropping here was terminal — getScreen() returned
+			// nil forever, the wall stayed dark, and it survived a world restart. Following
+			// is also what the player who grew the wall plainly meant.
+			TileEntityScreen2 originTile = screen.origin();
+			if (originTile == null || originTile.node() == null
+					|| originTile.node().address() == null) {
+				return; // origin's chunk not loaded: keep the claim and retry next tick
+			}
 			OpenGPU.logger.info("GPU " + node.address() + ": screen " + boundScreenAddress
-					+ " became part of a wall; releasing the binding");
-			boundScreen = null;
-			boundScreenAddress = null;
+					+ " joined a wall; following it to origin " + originTile.node().address());
+			boundScreenAddress = originTile.node().address();
+			screen = originTile;
+			boundScreen = screen;
 			chunkDirty = true;
-			return;
+			// Fall through: the origin may already be driven by another live GPU, and the
+			// check below is the one that arbitrates that.
 		}
 		String driver = screen.driverAddress();
 		if (driver != null && !driver.equals(node.address())
@@ -368,8 +381,12 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 				// Bind the wall's ORIGIN, whichever tile happens to be adjacent: the origin
 				// owns the surface, and a satellite's component is not even visible.
 				TileEntityScreen2 screen = ((TileEntityScreen2) te).origin();
-				if (screen != null && screen.node() != null && screen.node().address() != null
-						&& screenIsAvailable(screen)) {
+				// isOrigin() as well as origin(): during a reshape a tile's stored origin can
+				// briefly name a tile that is itself a satellite, and claiming it here only
+				// to have the check below reject it on the same tick spins a bind/release
+				// loop — one log line and one chunk markDirty per policy tick, forever.
+				if (screen != null && screen.isOrigin() && screen.node() != null
+						&& screen.node().address() != null && screenIsAvailable(screen)) {
 					boundScreenAddress = screen.node().address();
 					chunkDirty = true;
 					return;
@@ -531,12 +548,20 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 	/** Vanilla's interaction distance, squared — the same bound OC uses for screen input. */
 	private static final double REACH_SQ = 64.0;
 
+	/**
+	 * Measured to the nearest tile of the WALL, not to the bound screen's own block. The
+	 * bound screen is always the wall's ORIGIN, and the origin is sticky, so it can sit at
+	 * any corner of a surface up to MAX_WALL_SPAN tiles across — measuring from it left a
+	 * player standing right in front of the far end of a wide wall outside the bound, and
+	 * every GUI event was then dropped with no error, no log and no client feedback. The
+	 * in-world click path has no such gate, so the same wall still answered right-clicks:
+	 * it read as a broken GUI rather than as a range limit.
+	 */
 	private static boolean withinReach(EntityPlayer player, TileEntityScreen2 screen) {
 		if (player.worldObj != screen.getWorldObj()) {
 			return false;
 		}
-		return player.getDistanceSq(screen.xCoord + 0.5, screen.yCoord + 0.5, screen.zCoord + 0.5)
-				<= REACH_SQ;
+		return screen.distanceSqToNearestTile(player.posX, player.posY, player.posZ) <= REACH_SQ;
 	}
 
 	/**

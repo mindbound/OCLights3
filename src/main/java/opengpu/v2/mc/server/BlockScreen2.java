@@ -98,6 +98,13 @@ public class BlockScreen2 extends BlockContainer {
 			int side, float hitX, float hitY, float hitZ) {
 		int wallW = origin.wallWidth();
 		int wallH = origin.wallHeight();
+		// CONSTRAINT: the renderer letterboxes against the LIVE canvas size
+		// (SceneRenderer.sizeFor), while this inverse assumes the default. They agree only
+		// because ensureImplicitCanvas() is the sole caller of createCanvas() and always
+		// asks for DEFAULT_WIDTH x DEFAULT_HEIGHT. The first resolution control added to the
+		// GPU breaks that silently: the GUI would stay correct (GuiScene.toLogical uses the
+		// live size) while every in-world click drifted, growing toward the wall's edges.
+		// Whoever adds it must plumb the real size here.
 		int sceneW = TileEntityGpu2.DEFAULT_WIDTH;
 		int sceneH = TileEntityGpu2.DEFAULT_HEIGHT;
 
@@ -182,7 +189,10 @@ public class BlockScreen2 extends BlockContainer {
 		if (!world.isRemote) {
 			TileEntity te = world.getTileEntity(x, y, z);
 			if (te instanceof TileEntityScreen2) {
-				((TileEntityScreen2) te).markWallDirty();
+				// Filtered: this hook fires for redstone, pistons, water and every other
+				// neighbour that cannot possibly reshape a wall. Rescanning on all of them
+				// made a 1-tick clock beside a large wall a permanent server cost.
+				((TileEntityScreen2) te).markWallDirtyIfShapeCouldChange();
 			}
 		}
 	}
