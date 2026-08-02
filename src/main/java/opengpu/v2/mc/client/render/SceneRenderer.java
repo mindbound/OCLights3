@@ -34,6 +34,9 @@ public final class SceneRenderer {
 		// identity check would report "already uploaded" forever while the pixels change.
 		int uploadedEpoch;
 		int uploadedVersion;
+		/** Dimensions of the allocated GL texture; a sub-upload is only valid against these. */
+		int glWidth;
+		int glHeight;
 	}
 
 	private static final class SceneGl {
@@ -135,7 +138,29 @@ public final class SceneRenderer {
 					&& entry.uploadedVersion == res.version) {
 				continue;
 			}
-			long size = res.bytes.length;
+			// A sub-upload is legal whenever the GL texture holds SOME EARLIER version of
+			// this resource at matching dimensions and epoch.
+			//
+			// The bound is "earlier", not "exactly one behind": the dirty rect accumulates
+			// every write since the last upload (clearDirty runs only when we upload, and
+			// unionDirtyRect on every applied blit), so it describes the delta from
+			// uploadedVersion however many versions have passed. Requiring version - 1 would
+			// disable the whole optimisation for any tick containing more than one write —
+			// i.e. exactly the streaming workload it exists for — and for any texture that
+			// was skipped for budget. A body install and a snapshot carry-over both call
+			// markFullDirty, so those arrive as a full-rect sub-upload rather than a stale
+			// partial one.
+			boolean canSubUpload = entry != null
+					&& entry.uploadedEpoch == mirrorEpoch
+					&& entry.uploadedVersion > 0
+					&& entry.uploadedVersion < res.version
+					&& entry.glWidth == res.width && entry.glHeight == res.height
+					&& res.dirtyW > 0
+					&& res.dirtyX >= 0 && res.dirtyY >= 0
+					&& res.dirtyX + res.dirtyW <= res.width
+					&& res.dirtyY + res.dirtyH <= res.height;
+			long size = canSubUpload
+					? (long) res.dirtyW * res.dirtyH * 4L : res.bytes.length;
 			// Always admit the head of the queue: a texture bigger than one frame's budget
 			// would otherwise be skipped forever (the budget resets to the same value every
 			// frame), leaving a legally-created texture permanently invisible. Admitting it
@@ -144,6 +169,14 @@ public final class SceneRenderer {
 				continue; // over budget this frame; a later pre-pass picks it up
 			}
 			budget -= size;
+			if (canSubUpload) {
+				uploadSubRgba(entry.glId, res.width, res.bytes,
+						res.dirtyX, res.dirtyY, res.dirtyW, res.dirtyH);
+				entry.uploadedVersion = res.version;
+				res.clearDirty();
+				gl.uploadDirty = true;
+				continue;
+			}
 			if (entry == null) {
 				entry = new TexEntry();
 				entry.glId = GL11.glGenTextures();
@@ -152,12 +185,15 @@ public final class SceneRenderer {
 			uploadRgba(entry.glId, res.width, res.height, res.bytes);
 			entry.uploadedEpoch = mirrorEpoch;
 			entry.uploadedVersion = res.version;
+			entry.glWidth = res.width;
+			entry.glHeight = res.height;
 			res.clearDirty();
 			gl.uploadDirty = true;
 		}
 		return budget;
 	}
 
+	/** Full (re)allocation of the GL texture: first upload, or after a resize. */
 	private static void uploadRgba(int glId, int width, int height, byte[] rgba) {
 		ByteBuffer buffer = BufferUtils.createByteBuffer(rgba.length);
 		buffer.put(rgba);
@@ -168,6 +204,32 @@ public final class SceneRenderer {
 		GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_S, org.lwjgl.opengl.GL12.GL_CLAMP_TO_EDGE);
 		GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_T, org.lwjgl.opengl.GL12.GL_CLAMP_TO_EDGE);
 		GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, GL11.GL_RGBA8, width, height, 0,
+				GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, buffer);
+	}
+
+	/**
+	 * Upload only the rectangle that changed.
+	 *
+	 * A streaming program rewrites a small region per tick; re-uploading the whole image
+	 * makes the cost proportional to the texture size rather than the edit size — a 4-byte
+	 * write to a 1 MB texture moving a megabyte per frame. The rows are contiguous in the
+	 * source only when the rect spans the full width, so a partial-width rect is packed row
+	 * by row into a staging buffer.
+	 */
+	private static void uploadSubRgba(int glId, int texWidth, byte[] rgba,
+			int x, int y, int w, int h) {
+		ByteBuffer buffer = BufferUtils.createByteBuffer(w * h * 4);
+		if (w == texWidth) {
+			// Full-width rect: the rows are already contiguous, so one bulk copy suffices.
+			buffer.put(rgba, y * texWidth * 4, w * h * 4);
+		} else {
+			for (int row = 0; row < h; row++) {
+				buffer.put(rgba, ((y + row) * texWidth + x) * 4, w * 4);
+			}
+		}
+		buffer.flip();
+		GL11.glBindTexture(GL11.GL_TEXTURE_2D, glId);
+		GL11.glTexSubImage2D(GL11.GL_TEXTURE_2D, 0, x, y, w, h,
 				GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, buffer);
 	}
 

@@ -187,7 +187,7 @@ public final class Canvas2dRenderer {
 					ResourceInfo res = state.resources.get((int) a[0]);
 					Integer glId = glTextures.get((int) a[0]);
 					if (res != null && glId != null) {
-						texturedQuad(glId, a[1], a[2], res.width, res.height, 0, 0, 1, 1);
+						untintedQuad(glId, a[1], a[2], res.width, res.height, 0, 0, 1, 1);
 					}
 					break;
 				}
@@ -197,7 +197,7 @@ public final class Canvas2dRenderer {
 					if (res != null && glId != null && res.width > 0 && res.height > 0) {
 						double u0 = a[3] / res.width, v0 = a[4] / res.height;
 						double u1 = (a[3] + a[5]) / res.width, v1 = (a[4] + a[6]) / res.height;
-						texturedQuad(glId, a[1], a[2], a[5], a[6], u0, v0, u1, v1);
+						untintedQuad(glId, a[1], a[2], a[5], a[6], u0, v0, u1, v1);
 					}
 					break;
 				}
@@ -379,6 +379,22 @@ public final class Canvas2dRenderer {
 			pen += metrics.charAdvance(ch);
 		}
 		GL11.glEnd();
+	}
+
+	/**
+	 * Draw a texture at its own colours, ignoring the canvas draw colour.
+	 *
+	 * The draw colour is ambient state meant for shapes and text; letting it modulate blits
+	 * too means a fill colour set several commands earlier silently darkens or recolours
+	 * every later texture — a footgun that costs an image and gives no error. Per-object
+	 * tinting lives on Sprite nodes, which carry an explicit {@code tint} property.
+	 */
+	private void untintedQuad(int glId, double x, double y, double w, double h,
+			double u0, double v0, double u1, double v1) {
+		double r = colR, g = colG, b = colB, a = colA;
+		colR = 1; colG = 1; colB = 1; colA = 1;
+		texturedQuad(glId, x, y, w, h, u0, v0, u1, v1);
+		colR = r; colG = g; colB = b; colA = a;
 	}
 
 	private void texturedQuad(int glId, double x, double y, double w, double h,

@@ -28,7 +28,63 @@ import opengpu.v2.scene.CanvasCommand;
 public final class BatchCodec {
 	private BatchCodec() {}
 
+	/**
+	 * Leading short of a DEFLATE-wrapped batch: [short -2][int rawLen][deflated raw batch].
+	 *
+	 * A sentinel rather than a PROTOCOL_VERSION bump on purpose. The version is shared by
+	 * the batch, snapshot and message codecs AND by the persisted structure, so bumping it
+	 * for a batch-only change would force a save migration for nothing. Protocol versions
+	 * are positive, so a negative marker can never collide, and the inflated payload still
+	 * carries the real version — the strictness of the inner decode is unchanged.
+	 */
+	static final short COMPRESSED_MARKER = -2;
+
+	/** Below this, framing overhead outweighs any saving; small batches ship raw. */
+	static final int COMPRESS_THRESHOLD_BYTES = 256;
+
+	/**
+	 * Hard ceiling on a declared inflated size, refused BEFORE any allocation.
+	 *
+	 * Sized to what a batch can legitimately be, NOT to the transport ceiling. The transport
+	 * ceiling exists for resource bodies (up to a 256 MiB texture), and reusing it here would
+	 * let a few KB of deflate claim a quarter-gigabyte per inbound batch — reopening the
+	 * amplification this constant exists to close. One batch is at most a tick's worth of
+	 * deltas: the texture-write payload is capped at 16 KiB, and the largest canvas publish
+	 * this server produces is a few hundred KB, so 4 MiB is generous headroom.
+	 */
+	static final int MAX_INFLATED_BYTES = 4 * 1024 * 1024;
+
 	public static byte[] encode(SceneBatch batch) {
+		byte[] raw = encodeRaw(batch);
+		if (raw.length < COMPRESS_THRESHOLD_BYTES) {
+			return raw;
+		}
+		java.util.zip.Deflater deflater = new java.util.zip.Deflater(
+				java.util.zip.Deflater.BEST_SPEED);
+		try {
+			deflater.setInput(raw);
+			deflater.finish();
+			// Worst case for incompressible input is slightly larger than the input; give
+			// the buffer room so a single deflate() call always completes.
+			byte[] buffer = new byte[raw.length + 64];
+			int compressed = deflater.deflate(buffer);
+			if (!deflater.finished() || compressed + 6 >= raw.length) {
+				return raw; // incompressible: the wrapper would only add bytes
+			}
+			ByteArrayOutputStream bytes = new ByteArrayOutputStream(compressed + 6);
+			DataOutputStream out = new DataOutputStream(bytes);
+			out.writeShort(COMPRESSED_MARKER);
+			out.writeInt(raw.length);
+			out.write(buffer, 0, compressed);
+			return bytes.toByteArray();
+		} catch (IOException e) {
+			throw new RuntimeException(e);
+		} finally {
+			deflater.end();
+		}
+	}
+
+	private static byte[] encodeRaw(SceneBatch batch) {
 		try {
 			ByteArrayOutputStream bytes = new ByteArrayOutputStream();
 			DataOutputStream out = new DataOutputStream(bytes);
@@ -119,6 +175,10 @@ public final class BatchCodec {
 	}
 
 	public static SceneBatch decode(byte[] data) throws CodecException {
+		if (data != null && data.length >= 2
+				&& (short) (((data[0] & 0xFF) << 8) | (data[1] & 0xFF)) == COMPRESSED_MARKER) {
+			return decode(inflate(data));
+		}
 		try {
 			DataInputStream in = new DataInputStream(new ByteArrayInputStream(data));
 			short version = in.readShort();
@@ -148,6 +208,51 @@ public final class BatchCodec {
 		} catch (IllegalArgumentException e) {
 			// CanvasCommand constructor validation (bad op/arg shape from the wire).
 			throw new CodecException("Malformed batch: " + e.getMessage(), e);
+		}
+	}
+
+	/**
+	 * Inflate a marker-wrapped batch. The declared size is validated BEFORE allocating, and
+	 * the inflater is bounded by that allocation, so a crafted payload claiming gigabytes is
+	 * refused rather than serviced. A stream that inflates to a different size than declared
+	 * is a malformed batch, not a resizable one.
+	 */
+	private static byte[] inflate(byte[] data) throws CodecException {
+		if (data.length < 6)
+			throw new CodecException("Truncated compressed batch");
+		int rawLen = ((data[2] & 0xFF) << 24) | ((data[3] & 0xFF) << 16)
+				| ((data[4] & 0xFF) << 8) | (data[5] & 0xFF);
+		if (rawLen < 2 || rawLen > MAX_INFLATED_BYTES)
+			throw new CodecException("Compressed batch declares an unusable size: " + rawLen);
+		java.util.zip.Inflater inflater = new java.util.zip.Inflater();
+		try {
+			inflater.setInput(data, 6, data.length - 6);
+			byte[] raw = new byte[rawLen];
+			int produced = inflater.inflate(raw);
+			if (produced != rawLen || !inflater.finished())
+				throw new CodecException("Compressed batch does not inflate to its declared size");
+			// The inner decode's no-trailing-data rule must survive the wrapper: an inflater
+			// simply stops at the end of the deflate stream and never looks at what follows,
+			// so without this check the compressed path silently accepts appended garbage
+			// that the raw path rejects.
+			if (inflater.getRemaining() != 0)
+				throw new CodecException("Trailing data after compressed batch");
+			// encode() wraps at most once and encodeRaw() always leads with the positive
+			// PROTOCOL_VERSION, so a marker INSIDE an inflated payload is hostile or corrupt.
+			// Refusing it pins decode's recursion at one level: without this, N nested
+			// wrappers recurse N deep with every level's byte[] simultaneously live, so a
+			// few hundred KB on the wire becomes hundreds of MB and a StackOverflowError —
+			// which escapes the CodecException-only catch in the inbound drain and takes the
+			// client down. That is the very amplification the size ceiling above exists to
+			// refuse, so the ceiling must not be bypassable by nesting.
+			if (raw.length >= 2
+					&& (short) (((raw[0] & 0xFF) << 8) | (raw[1] & 0xFF)) == COMPRESSED_MARKER)
+				throw new CodecException("Nested compressed batch");
+			return raw;
+		} catch (java.util.zip.DataFormatException e) {
+			throw new CodecException("Malformed compressed batch", e);
+		} finally {
+			inflater.end();
 		}
 	}
 

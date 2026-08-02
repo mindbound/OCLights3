@@ -825,7 +825,7 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 		return new Object[] { FontMetrics.get().textWidth(args.checkString(0)) };
 	}
 
-	@Callback(direct = true, limit = 256, doc = "function(id:number, x:number, y:number[, tx:number, ty:number, w:number, h:number]) -- Draw a texture (optionally a sub-rectangle), tinted by the current color.")
+	@Callback(direct = true, limit = 256, doc = "function(id:number, x:number, y:number[, tx:number, ty:number, w:number, h:number]) -- Draw a texture (optionally a sub-rectangle) at its own colors. The current draw color does NOT tint it (setColor affects shapes and text only).")
 	public Object[] drawTexture(Context context, Arguments args) throws Exception {
 		int id = args.checkInteger(0);
 		double x = checkFinite(args.checkDouble(1), "x"), y = checkFinite(args.checkDouble(2), "y");
