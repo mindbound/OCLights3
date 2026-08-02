@@ -35,5 +35,15 @@ dependencies {
     runtimeOnly("com.github.GTNewHorizons:OpenComputers:1.12.55-GTNH:dev") {
         excludeDeps()
     }
+    // OpenComputers' own coremod transformer (li.cil.oc.common.asm.ClassTransformer) resolves
+    // GTNHLib's ClassConstantPoolParser in its constructor, which LaunchWrapper instantiates
+    // before any mod class loads. excludeDeps() above strips OC's transitive tree, so without
+    // this the server dies at launch with NoClassDefFoundError — invisible to `gradlew build`
+    // (compileOnly against the API needs none of it) and only reachable by actually starting
+    // the game, which is why CI caught it and local builds never did.
+    // Version tracks what OpenComputers 1.12.55-GTNH declares; bump it with the OC pin.
+    runtimeOnly("com.github.GTNewHorizons:GTNHLib:0.11.24:dev") {
+        excludeDeps()
+    }
     testImplementation("junit:junit:4.13.2")
 }
