@@ -42,8 +42,13 @@ dependencies {
     // (compileOnly against the API needs none of it) and only reachable by actually starting
     // the game, which is why CI caught it and local builds never did.
     // Version tracks what OpenComputers 1.12.55-GTNH declares; bump it with the OC pin.
-    runtimeOnly("com.github.GTNewHorizons:GTNHLib:0.11.24:dev") {
-        excludeDeps()
-    }
+    //
+    // NOTE: no excludeDeps() here, deliberately. GTNHLib is a coremod that cascades a Mixin
+    // tweaker, so it needs its own declared tree at launch — unimixins above all. Excluding it
+    // reproduced the original failure one layer down (ClassNotFoundException: MixinTweaker).
+    // Its deps are plain libraries (unimixins, fastutil, joml, brigadier, GTNHExtLib) with no
+    // Minecraft or Forge among them, so resolving them is safe; that is NOT true of the OC
+    // artifacts above, where the exclusion is load-bearing.
+    runtimeOnly("com.github.GTNewHorizons:GTNHLib:0.11.24:dev")
     testImplementation("junit:junit:4.13.2")
 }
