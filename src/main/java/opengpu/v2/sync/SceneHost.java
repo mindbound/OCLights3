@@ -248,10 +248,22 @@ public final class SceneHost {
 			int served = 0;
 			while (ids.hasNext() && served < bodiesPerWatcherPerTick) {
 				int resId = ids.next();
-				ids.remove();
 				byte[] envelope = bodyEnvelope(resId);
+				// REMOVE ONLY ON A DECIDED OUTCOME — served, or permanently unservable.
+				//
+				// A null envelope means freed, not a texture, or no bytes server-side: none of
+				// those can become servable by waiting, so dropping the request is correct and
+				// the client's resync path covers it. Anything DEFERRED must stay pending.
+				//
+				// Today the only deferral is the per-tick count, and the loop condition stops
+				// before the next ids.next(), so nothing is lost. That safety is incidental,
+				// though: the design's outstanding body BYTE budget defers a specific id for
+				// its size, and removing before the send — as this did — would silently lose
+				// exactly the large bodies the budget exists to pace. Keep the removal tied to
+				// the outcome so adding that budget cannot reintroduce it.
+				ids.remove();
 				if (envelope == null)
-					continue; // freed / not a texture: the client's resync path resolves it
+					continue;
 				stampBodyServe(watcher, resId, currentTick);
 				transport.sendToWatcher(watcher, envelope);
 				served++;

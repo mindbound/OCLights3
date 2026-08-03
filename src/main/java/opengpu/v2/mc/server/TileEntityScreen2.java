@@ -768,6 +768,39 @@ public class TileEntityScreen2 extends TileEntity implements Environment {
 		return INFINITE_EXTENT_AABB;
 	}
 
+	/**
+	 * The THIRD culling gate, which infinite render bounds do NOT bypass.
+	 *
+	 * After the bounds test, vanilla's TileEntityRendererDispatcher draws only when
+	 * {@code getDistanceFrom(camera) < getMaxRenderDistanceSquared()}, and the default 4096
+	 * (64 blocks) is measured from THIS TILE'S OWN BLOCK. The origin is sticky, so it can sit
+	 * at any corner of a wall up to {@link #MAX_WALL_SPAN} tiles across — a 16x16 wall whose
+	 * origin is 70 blocks away stops drawing entirely while its nearest edge is ~49 blocks
+	 * away and plainly in view.
+	 *
+	 * Exactly the defect family as the input reach check that was measured from the origin
+	 * rather than the surface: a distance about the WALL must be derived from the wall, not
+	 * from the one block that happens to anchor it. So extend the radius by the origin's
+	 * furthest in-wall corner and square that.
+	 *
+	 * Only the origin draws, but the dispatcher tests every tile, so satellites answer for
+	 * themselves — their own 1x1 extent, which is the vanilla default.
+	 */
+	@Override
+	@cpw.mods.fml.relauncher.SideOnly(cpw.mods.fml.relauncher.Side.CLIENT)
+	public double getMaxRenderDistanceSquared() {
+		if (!isOrigin()) {
+			return super.getMaxRenderDistanceSquared();
+		}
+		// Furthest tile from the origin, in blocks: the diagonal of its own offsets against
+		// the far edges. col/row are the origin's own position inside the rectangle.
+		int dx = Math.max(col, wallW - 1 - col);
+		int dy = Math.max(row, wallH - 1 - row);
+		double reach = Math.sqrt(super.getMaxRenderDistanceSquared())
+				+ Math.sqrt((double) dx * dx + (double) dy * dy);
+		return reach * reach;
+	}
+
 	// ------------------------------------------------------------------
 	// OC Environment
 
