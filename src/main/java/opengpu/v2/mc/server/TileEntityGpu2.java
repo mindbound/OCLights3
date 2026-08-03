@@ -1329,7 +1329,17 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 		return null;
 	}
 
-	@Callback(direct = true, limit = 16, doc = "function(resourceId:number):number -- Create a sprite node drawing a texture or canvas as a quad; returns its node id.")
+	/**
+	 * TEXTURE refs only, deliberately.
+	 *
+	 * DESIGN-RENDERER-V2 says an offscreen canvas is "referenceable as a texture source by
+	 * drawTexture/Sprite", but the client does not implement that yet: Canvas2dRenderer draws
+	 * a sprite only when {@code res.type == RES_TEXTURE}, so a canvas-backed sprite converges
+	 * perfectly and renders NOTHING. Accepting one here would ship a call that silently does
+	 * nothing — the same reason there is no createGroup. Use createCanvasNode to show a canvas
+	 * until the renderer grows canvas-as-texture-source.
+	 */
+	@Callback(direct = true, limit = 16, doc = "function(textureId:number):number -- Create a sprite node drawing a texture as a quad; returns its node id. For an offscreen canvas use createCanvasNode.")
 	public Object[] createSprite(Context context, Arguments args) throws Exception {
 		return createNodeLocked(V2Wire.NODE_SPRITE, args.checkInteger(0), true);
 	}
@@ -1339,16 +1349,25 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 		return createNodeLocked(V2Wire.NODE_CANVAS, args.checkInteger(0), false);
 	}
 
-	/** Shared node allocation: validates the referenced resource, then charges the node cap. */
-	private Object[] createNodeLocked(byte nodeType, int ref, boolean textureOrCanvas) throws Exception {
+	/**
+	 * Shared node allocation: validates the referenced resource, then charges the node cap.
+	 *
+	 * {@code wantTexture} distinguishes the two node kinds, and the check is not pedantry —
+	 * each renders only its own resource type, so a mismatched ref produces a node that
+	 * converges and draws nothing.
+	 */
+	private Object[] createNodeLocked(byte nodeType, int ref, boolean wantTexture) throws Exception {
 		synchronized (sceneLock) {
 			requireScene();
 			ResourceInfo res = scene.state().resources.get(ref);
 			if (res == null) {
 				throw new Exception("invalid resource id " + ref);
 			}
-			if (!textureOrCanvas && res.type != V2Wire.RES_CANVAS) {
-				throw new Exception("resource " + ref + " is not a canvas");
+			byte want = wantTexture ? V2Wire.RES_TEXTURE : V2Wire.RES_CANVAS;
+			if (res.type != want) {
+				throw new Exception(wantTexture
+						? "resource " + ref + " is a canvas, not a texture; use createCanvasNode"
+						: "resource " + ref + " is a texture, not a canvas; use createSprite");
 			}
 			if (scene.state().nodes.size() >= ServerScene.MAX_NODES) {
 				throw new Exception("scene node limit reached (" + ServerScene.MAX_NODES + ")");

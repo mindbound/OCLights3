@@ -71,19 +71,22 @@ public class SceneGraphTest {
 	}
 
 	@Test
-	public void aSpriteMaySourceAnOffscreenCanvas() throws Exception {
-		// The v2 answer to OCL2's "textures are framebuffers": draw into a canvas, then show
-		// it through a sprite. If the ref were restricted to textures this would throw.
+	public void aCanvasIsShownThroughACanvasNodeNotASprite() throws Exception {
+		// Canvas2dRenderer draws NODE_SPRITE only when its ref is RES_TEXTURE, and NODE_CANVAS
+		// only when its ref is RES_CANVAS. A mismatched ref converges perfectly and renders
+		// NOTHING, so the pairing is a real constraint rather than bookkeeping — the callbacks
+		// reject the wrong type for exactly this reason.
 		ServerScene server = new ServerScene(SCENE);
 		SceneMirror mirror = new SceneMirror(SCENE);
 		server.setCurrentTick(1);
 		withDisplay(server);
 		int offscreen = server.createCanvas(64, 64, CAP);
-		int sprite = server.createNode(V2Wire.NODE_SPRITE, offscreen);
+		int layer = server.createNode(V2Wire.NODE_CANVAS, offscreen);
 		ship(server, mirror);
 
 		assertTrue(server.state().contentEquals(mirror.state()));
-		assertEquals(offscreen, mirror.state().nodes.get(sprite).ref);
+		assertEquals(offscreen, mirror.state().nodes.get(layer).ref);
+		assertEquals(V2Wire.NODE_CANVAS, mirror.state().nodes.get(layer).type);
 	}
 
 	@Test
