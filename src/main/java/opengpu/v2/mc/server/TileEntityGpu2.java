@@ -1267,6 +1267,197 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 		return null;
 	}
 
+	// ------------------------------------------------------------------
+	// Retained scene graph: offscreen canvases and nodes.
+	//
+	// Raw, id-based surface by design. DESIGN-RENDERER-V2 states the layering outright — "the
+	// wrapper lib is the documented API; the raw callback surface is documented via doc= for
+	// library authors" — so these exist to be wrapped into canvas/node objects by the Lua
+	// library, with the handle-invalidation semantics that belong there. Deliberately NOT
+	// AbstractValue wrappers on this side: legacy A-03 was a non-static inner AbstractValue
+	// that OC could not reinstantiate on restore, and ids sidestep the whole class of hazard.
+	//
+	// NO createGroup(): NODE_GROUP is a wire type with no semantics yet. SceneNode has no
+	// parent field and there is no PROP_PARENT, so a group can hold nothing — transform
+	// parenting is Stage B. Exposing it now would ship a call that provably does nothing.
+
+	@Callback(direct = true, limit = 8, doc = "function(width:number, height:number[, commandCap:number]):number -- Allocate an offscreen canvas; returns its resource id. Draw into it, or use it as a drawTexture/sprite source.")
+	public Object[] createCanvas(Context context, Arguments args) throws Exception {
+		int w = args.checkInteger(0), h = args.checkInteger(1);
+		int cap = args.count() > 2 ? args.checkInteger(2) : CANVAS_COMMAND_CAP;
+		if (w <= 0 || h <= 0 || w > MAX_CANVAS_DIM || h > MAX_CANVAS_DIM) {
+			throw new Exception("canvas size out of range (1.." + MAX_CANVAS_DIM + ")");
+		}
+		if (cap <= 0 || cap > CANVAS_COMMAND_CAP) {
+			throw new Exception("command cap out of range (1.." + CANVAS_COMMAND_CAP + ")");
+		}
+		synchronized (sceneLock) {
+			requireScene();
+			// Same two-term charge usedVramLocked applies: command slots AND pixels. A canvas
+			// is a real client FBO allocation, so it is bounded by the same budget as textures.
+			long cost = (long) cap * CANVAS_SLOT_COST + (long) w * (long) h * 4L;
+			if (usedVramLocked() + cost > VRAM_BUDGET_BYTES) {
+				throw new Exception("not enough GPU memory");
+			}
+			int id = scene.createCanvas(w, h, cap);
+			chunkDirty = true;
+			return new Object[] { id };
+		}
+	}
+
+	@Callback(direct = true, limit = 32, doc = "function(id:number) -- Free an offscreen canvas. Nodes and recorded draws still referencing it render nothing.")
+	public Object[] freeCanvas(Context context, Arguments args) throws Exception {
+		int id = args.checkInteger(0);
+		synchronized (sceneLock) {
+			requireScene();
+			ResourceInfo res = scene.state().resources.get(id);
+			if (res == null || res.type != V2Wire.RES_CANVAS) {
+				throw new Exception("invalid canvas id " + id);
+			}
+			if (id == implicitCanvasRes) {
+				throw new Exception("cannot free the display canvas");
+			}
+			// Same reasoning as freeTexture: a draw buffered earlier this tick that references
+			// this canvas would fail validation at flush and cost the whole frame.
+			dropDrawsReferencing(recording, id);
+			if (pendingPresent != null) {
+				dropDrawsReferencing(pendingPresent, id);
+			}
+			scene.freeResource(id);
+			chunkDirty = true;
+		}
+		return null;
+	}
+
+	@Callback(direct = true, limit = 16, doc = "function(resourceId:number):number -- Create a sprite node drawing a texture or canvas as a quad; returns its node id.")
+	public Object[] createSprite(Context context, Arguments args) throws Exception {
+		return createNodeLocked(V2Wire.NODE_SPRITE, args.checkInteger(0), true);
+	}
+
+	@Callback(direct = true, limit = 16, doc = "function(canvasId:number):number -- Create a node that displays an offscreen canvas as a layer; returns its node id.")
+	public Object[] createCanvasNode(Context context, Arguments args) throws Exception {
+		return createNodeLocked(V2Wire.NODE_CANVAS, args.checkInteger(0), false);
+	}
+
+	/** Shared node allocation: validates the referenced resource, then charges the node cap. */
+	private Object[] createNodeLocked(byte nodeType, int ref, boolean textureOrCanvas) throws Exception {
+		synchronized (sceneLock) {
+			requireScene();
+			ResourceInfo res = scene.state().resources.get(ref);
+			if (res == null) {
+				throw new Exception("invalid resource id " + ref);
+			}
+			if (!textureOrCanvas && res.type != V2Wire.RES_CANVAS) {
+				throw new Exception("resource " + ref + " is not a canvas");
+			}
+			if (scene.state().nodes.size() >= ServerScene.MAX_NODES) {
+				throw new Exception("scene node limit reached (" + ServerScene.MAX_NODES + ")");
+			}
+			int id = scene.createNode(nodeType, ref);
+			chunkDirty = true;
+			return new Object[] { id };
+		}
+	}
+
+	@Callback(direct = true, limit = 32, doc = "function(nodeId:number) -- Remove a node from the scene.")
+	public Object[] freeNode(Context context, Arguments args) throws Exception {
+		int id = args.checkInteger(0);
+		synchronized (sceneLock) {
+			requireScene();
+			requireNodeLocked(id);
+			if (id == implicitCanvasNode) {
+				throw new Exception("cannot free the display node");
+			}
+			scene.freeNode(id);
+			chunkDirty = true;
+		}
+		return null;
+	}
+
+	@Callback(direct = true, limit = 256, doc = "function(nodeId:number, x:number, y:number[, rotation:number, scaleX:number, scaleY:number]) -- Set a node's transform. Rotation is radians; scale defaults to 1.")
+	public Object[] setNodeTransform(Context context, Arguments args) throws Exception {
+		int id = args.checkInteger(0);
+		double x = args.checkDouble(1), y = args.checkDouble(2);
+		double rot = args.count() > 3 ? args.checkDouble(3) : 0.0;
+		double sx = args.count() > 4 ? args.checkDouble(4) : 1.0;
+		double sy = args.count() > 5 ? args.checkDouble(5) : sx;
+		requireFinite(x, "x"); requireFinite(y, "y"); requireFinite(rot, "rotation");
+		requireFinite(sx, "scaleX"); requireFinite(sy, "scaleY");
+		synchronized (sceneLock) {
+			requireScene();
+			requireNodeLocked(id);
+			scene.setTransform(id, x, y, rot, sx, sy);
+			chunkDirty = true;
+		}
+		return null;
+	}
+
+	@Callback(direct = true, limit = 256, doc = "function(nodeId:number, z:number) -- Set a node's draw order; higher draws later.")
+	public Object[] setNodeZ(Context context, Arguments args) throws Exception {
+		int id = args.checkInteger(0), z = args.checkInteger(1);
+		synchronized (sceneLock) {
+			requireScene();
+			requireNodeLocked(id);
+			scene.setZ(id, z);
+			chunkDirty = true;
+		}
+		return null;
+	}
+
+	@Callback(direct = true, limit = 256, doc = "function(nodeId:number, visible:boolean) -- Show or hide a node without freeing it.")
+	public Object[] setNodeVisible(Context context, Arguments args) throws Exception {
+		int id = args.checkInteger(0);
+		boolean visible = args.checkBoolean(1);
+		synchronized (sceneLock) {
+			requireScene();
+			requireNodeLocked(id);
+			scene.setVisible(id, visible);
+			chunkDirty = true;
+		}
+		return null;
+	}
+
+	@Callback(direct = true, limit = 256, doc = "function(nodeId:number, r:number, g:number, b:number[, a:number]) -- Multiply a node's output by a colour (0-255 channels).")
+	public Object[] setNodeTint(Context context, Arguments args) throws Exception {
+		int id = args.checkInteger(0);
+		int r = clampChannel(args.checkInteger(1));
+		int g = clampChannel(args.checkInteger(2));
+		int b = clampChannel(args.checkInteger(3));
+		int a = args.count() > 4 ? clampChannel(args.checkInteger(4)) : 255;
+		synchronized (sceneLock) {
+			requireScene();
+			requireNodeLocked(id);
+			scene.setTint(id, (a << 24) | (r << 16) | (g << 8) | b);
+			chunkDirty = true;
+		}
+		return null;
+	}
+
+	/** Callers hold sceneLock. */
+	private void requireNodeLocked(int nodeId) throws Exception {
+		if (!scene.state().nodes.containsKey(nodeId)) {
+			throw new Exception("invalid node id " + nodeId);
+		}
+	}
+
+	/**
+	 * Rejects NaN and infinity before they reach a transform.
+	 *
+	 * checkDouble does NOT saturate the way checkInteger does — it hands the raw Lua number
+	 * straight through, so a NaN would ride the wire, land in every mirror identically (no
+	 * divergence detector fires), and poison the renderer's transform matrix for the whole
+	 * scene rather than just that node.
+	 */
+	private static void requireFinite(double v, String name) throws Exception {
+		if (Double.isNaN(v) || Double.isInfinite(v)) {
+			throw new Exception(name + " must be a finite number");
+		}
+	}
+
+	private static int clampChannel(int v) {
+		return v < 0 ? 0 : (v > 255 ? 255 : v);
+	}
+
 	private static void dropDrawsReferencing(List<CanvasCommand> commands, int resId) {
 		for (java.util.Iterator<CanvasCommand> it = commands.iterator(); it.hasNext();) {
 			CanvasCommand cmd = it.next();

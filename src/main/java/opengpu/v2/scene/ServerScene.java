@@ -251,9 +251,25 @@ public final class ServerScene {
 		applyAndStage(new Delta.ResourceFree(resId));
 	}
 
+	/**
+	 * Most nodes one scene may hold.
+	 *
+	 * Enforced HERE, at the single allocation point, rather than in DeltaApplier: a mirror must
+	 * apply whatever the server legitimately produced, and a decode-time cap that the two sides
+	 * could ever disagree on turns a legal batch into a permanent resync loop. Restore paths go
+	 * through SnapshotCodec, not here, so lowering this constant can never brick an existing
+	 * save — it only refuses new allocations.
+	 *
+	 * The id space alone is not a bound: it permits 2^31 nodes, and every node costs server
+	 * memory, snapshot bytes to every watcher, and per-frame client work.
+	 */
+	public static final int MAX_NODES = 4096;
+
 	public int createNode(byte nodeType, int ref) {
 		if (ref != 0 && !state.resources.containsKey(ref))
 			throw new IllegalStateException("Node references unknown resource " + ref);
+		if (state.nodes.size() >= MAX_NODES)
+			throw new IllegalStateException("Scene node limit reached (" + MAX_NODES + ")");
 		if (state.nextNodeId == Integer.MAX_VALUE)
 			throw new IllegalStateException("Scene node id space exhausted; recreate the scene");
 		int id = state.nextNodeId++;
