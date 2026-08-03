@@ -51,6 +51,11 @@ public final class DeltaApplier {
 				node.visible = d.values[vi++] != 0;
 			if ((d.mask & V2Wire.PROP_TINT) != 0)
 				node.tint = (int) (long) (double) d.values[vi++];
+			// PROP_TELEPORT is consumed but NOT stored: it qualifies this transition, not the
+			// node. Reading it keeps vi aligned; SceneMirror is what routes it to the
+			// client's interpolator, and the server simply ignores it.
+			if ((d.mask & V2Wire.PROP_TELEPORT) != 0)
+				vi++;
 		} else if (delta instanceof Delta.ResourceCreate) {
 			Delta.ResourceCreate d = (Delta.ResourceCreate) delta;
 			if (!V2Wire.isKnownResType(d.resType))

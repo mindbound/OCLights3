@@ -158,7 +158,12 @@ public class BatchCodecTest {
 	public void rejectsUnknownPropMaskBits() {
 		byte[] data = singleDelta(new Delta.NodeProps(1, V2Wire.PROP_X, new double[] { 1 }));
 		// [type byte][int nodeId][int mask]: set a bit above KNOWN_PROPS_MASK in the mask.
-		data[FIRST_DELTA_OFFSET + 1 + 4 + 2] = 1; // mask becomes 0x00010001
+		// Byte index 2 of the big-endian mask covers bits 15..8, so 0x02 sets bit 9 — the
+		// lowest bit still unknown now that PROP_TELEPORT claimed bit 8 and widened
+		// KNOWN_PROPS_MASK to 0x1FF. (This line previously wrote 1 here and claimed it made
+		// the mask 0x00010001; it actually set bit 8, which is why widening the mask turned
+		// this into a truncation failure rather than the mask rejection it is testing.)
+		data[FIRST_DELTA_OFFSET + 1 + 4 + 2] = 2; // mask becomes 0x00000201
 		try {
 			BatchCodec.decode(data);
 			fail("expected CodecException");

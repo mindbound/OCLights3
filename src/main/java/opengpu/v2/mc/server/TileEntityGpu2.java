@@ -936,6 +936,84 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 		return null;
 	}
 
+	/**
+	 * Whole-canvas hard clear — and the only clear that compacts unconditionally.
+	 *
+	 * {@code fill()} truncates the recorded list only when the colour is fully OPAQUE, because
+	 * a translucent fill blends with what is under it and replay-from-scratch would differ.
+	 * A full-canvas CLEAR_RECT hard-SETS, so it compacts at any alpha — including alpha 0,
+	 * which is how a program makes the surface genuinely transparent rather than tinted.
+	 *
+	 * Reading the canvas size server-side is the point: a program calling
+	 * {@code clearRectangle(0, 0, getResolution())} has to fetch the size, and its copy goes
+	 * stale the moment setResolution runs — after which the rect no longer spans the canvas
+	 * and silently stops compacting.
+	 *
+	 * Clears the CANVAS only. Sprite and canvas nodes are siblings composited above it and are
+	 * untouched by any drawing call; {@link #clearNodes} is what removes those.
+	 */
+	@Callback(direct = true, limit = 256, doc = "function() -- Hard-clear the whole canvas to the current color (no blending). Does not remove nodes; see clearNodes.")
+	public Object[] clear(Context context, Arguments args) throws Exception {
+		synchronized (sceneLock) {
+			requireScene();
+			int[] size = resolutionLocked();
+			record(CanvasCommand.of(V2Wire.OP_CLEAR_RECT, 0, 0, size[0], size[1]));
+		}
+		return null;
+	}
+
+	/**
+	 * Free every node except the display node — "give me a blank scene".
+	 *
+	 * Nodes are RETAINED and PERSISTED: they outlive the program that made them, survive a
+	 * computer reboot, and are written into the world save. Without this, a program that dies
+	 * holding node ids — a crash, an interrupt, a reboot — orphans them permanently, and the
+	 * only recovery is breaking the GPU. Every long-running program should call this at
+	 * startup rather than trusting the scene to be empty.
+	 */
+	@Callback(direct = true, limit = 8, doc = "function():number -- Free every node except the display node; returns how many were freed. Nodes persist across reboots, so call this at startup.")
+	public Object[] clearNodes(Context context, Arguments args) throws Exception {
+		synchronized (sceneLock) {
+			requireScene();
+			// Collect first: freeNode mutates the map we would otherwise be iterating.
+			java.util.List<Integer> doomed = new java.util.ArrayList<Integer>();
+			for (Integer id : scene.state().nodes.keySet()) {
+				if (id.intValue() != implicitCanvasNode) {
+					doomed.add(id);
+				}
+			}
+			for (Integer id : doomed) {
+				scene.freeNode(id.intValue());
+			}
+			if (!doomed.isEmpty()) {
+				chunkDirty = true;
+			}
+			return new Object[] { doomed.size() };
+		}
+	}
+
+	/**
+	 * Live node ids, ascending, as a 1-based Lua table.
+	 *
+	 * The scene is persistent state a program may inherit rather than create, so a library
+	 * needs some way to see what is already there — to adopt it, audit it, or decide to clear
+	 * it. Without this the only way to learn a node exists is to have created it.
+	 */
+	@Callback(direct = true, limit = 8, doc = "function():table -- Live node ids, ascending, 1-based. The display node is always the first.")
+	public Object[] nodes(Context context, Arguments args) throws Exception {
+		synchronized (sceneLock) {
+			requireScene();
+			// LinkedHashMap keyed 1..n: OC converts a Map to a Lua table, and the scene's
+			// nodes are a TreeMap, so ascending order is free and deterministic.
+			java.util.Map<Integer, Integer> out = new java.util.LinkedHashMap<Integer, Integer>();
+			int i = 1;
+			for (Integer id : scene.state().nodes.keySet()) {
+				out.put(Integer.valueOf(i++), id);
+			}
+			return new Object[] { out };
+		}
+	}
+
 	private static double[] quad(Arguments args) throws Exception {
 		return new double[] {
 				checkFinite(args.checkDouble(0), "arg1"), checkFinite(args.checkDouble(1), "arg2"),
@@ -1393,19 +1471,22 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 		return null;
 	}
 
-	@Callback(direct = true, limit = 256, doc = "function(nodeId:number, x:number, y:number[, rotation:number, scaleX:number, scaleY:number]) -- Set a node's transform. Rotation is radians; scale defaults to 1.")
+	@Callback(direct = true, limit = 256, doc = "function(nodeId:number, x:number, y:number[, rotation:number, scaleX:number, scaleY:number, teleport:boolean]) -- Set a node's transform. Rotation is radians; scale defaults to 1. teleport=true snaps instead of interpolating, for a deliberate jump.")
 	public Object[] setNodeTransform(Context context, Arguments args) throws Exception {
 		int id = args.checkInteger(0);
 		double x = args.checkDouble(1), y = args.checkDouble(2);
 		double rot = args.count() > 3 ? args.checkDouble(3) : 0.0;
 		double sx = args.count() > 4 ? args.checkDouble(4) : 1.0;
 		double sy = args.count() > 5 ? args.checkDouble(5) : sx;
+		// Clients interpolate a transform change over one server tick, which is right for
+		// animation and wrong for a jump — a teleported sprite would crawl to its destination.
+		boolean teleport = args.count() > 6 && args.checkBoolean(6);
 		requireFinite(x, "x"); requireFinite(y, "y"); requireFinite(rot, "rotation");
 		requireFinite(sx, "scaleX"); requireFinite(sy, "scaleY");
 		synchronized (sceneLock) {
 			requireScene();
 			requireNodeLocked(id);
-			scene.setTransform(id, x, y, rot, sx, sy);
+			scene.setTransform(id, x, y, rot, sx, sy, teleport);
 			chunkDirty = true;
 		}
 		return null;

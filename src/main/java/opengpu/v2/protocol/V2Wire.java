@@ -83,8 +83,21 @@ public final class V2Wire {
 	public static final int PROP_Z = 1 << 5;
 	public static final int PROP_VISIBLE = 1 << 6;
 	public static final int PROP_TINT = 1 << 7;
+	/**
+	 * "This transform change is a JUMP — do not interpolate it."
+	 *
+	 * Carries a 0/1 value like PROP_VISIBLE rather than being a valueless flag, because the
+	 * codec derives the value count from Integer.bitCount(mask); a bit without a value would
+	 * desynchronise every field after it.
+	 *
+	 * Transient by nature: it describes a transition, not state, so nothing stores it on
+	 * SceneNode and it never reaches a save — snapshots encode node VALUES, not deltas. That
+	 * is why widening the mask needs no PROTOCOL_VERSION bump and no save migration, the same
+	 * reasoning as the compression sentinel in BatchCodec.
+	 */
+	public static final int PROP_TELEPORT = 1 << 8;
 	/** Every defined property bit; masks carrying anything else are rejected outright. */
-	public static final int KNOWN_PROPS_MASK = 0xFF;
+	public static final int KNOWN_PROPS_MASK = 0x1FF;
 
 	// Canvas op ids (v2 replaces CommandEnum; the Transelate typo dies here)
 	public static final byte OP_FILL = 1;

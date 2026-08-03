@@ -35,6 +35,8 @@ public final class SceneMirror {
 	private long lastServerTick;
 	private boolean needsResync;
 	private boolean dirty;
+	/** Nodes that must SNAP this frame rather than interpolate; cleared with dirty. */
+	private final java.util.Set<Integer> teleported = new java.util.HashSet<Integer>();
 
 	public SceneMirror(String sceneId) {
 		this(sceneId, 0);
@@ -68,6 +70,19 @@ public final class SceneMirror {
 
 	public void clearDirty() {
 		dirty = false;
+		teleported.clear();
+	}
+
+	/**
+	 * Node ids whose transform arrived flagged PROP_TELEPORT since the last clearDirty.
+	 *
+	 * Routed here rather than through DeltaApplier because the flag qualifies a TRANSITION,
+	 * not node state: storing it on SceneNode would put it in snapshots and in contentEquals,
+	 * where a teleport would read as divergence. The applier consumes the value to keep its
+	 * cursor aligned and ignores it; this is the client's only interest in it.
+	 */
+	public java.util.Set<Integer> teleportedNodes() {
+		return teleported;
 	}
 
 	public int knownEpoch() {
@@ -122,6 +137,12 @@ public final class SceneMirror {
 		boolean clean = true;
 		for (Delta d : batch.deltas) {
 			try {
+				if (d instanceof Delta.NodeProps) {
+					Delta.NodeProps np = (Delta.NodeProps) d;
+					if ((np.mask & V2Wire.PROP_TELEPORT) != 0) {
+						teleported.add(Integer.valueOf(np.nodeId));
+					}
+				}
 				DeltaApplier.apply(state, d);
 			} catch (Exception e) {
 				// Unknown id / mismatch: state is unreliable from here — resync overwrites.

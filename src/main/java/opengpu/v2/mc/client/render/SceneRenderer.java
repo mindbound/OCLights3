@@ -288,7 +288,7 @@ public final class SceneRenderer {
 		// capture() is what starts a node moving, so skipping it would drop the motion
 		// entirely on the frame the batch lands.
 		if (mirror.isDirty()) {
-			gl.interp.capture(mirror.state(), now);
+			gl.interp.capture(mirror.state(), now, mirror.teleportedNodes());
 		}
 		// Re-render while anything is still mid-flight, not only when a batch arrived — that
 		// is the whole point, since batches land at 20 Hz and we draw at 60+. A settled scene

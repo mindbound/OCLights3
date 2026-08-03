@@ -51,6 +51,15 @@ final class NodeInterpolator {
 	 * one sprite moves does not restart everything else's interpolation.
 	 */
 	void capture(SceneState state, long nowNanos) {
+		capture(state, nowNanos, java.util.Collections.<Integer>emptySet());
+	}
+
+	/**
+	 * @param teleported nodes whose change was flagged PROP_TELEPORT — they SNAP instead of
+	 *                   sliding. Without this a deliberate jump across the screen crawls over
+	 *                   one server tick, which is worse than the stepping interpolation fixed.
+	 */
+	void capture(SceneState state, long nowNanos, java.util.Set<Integer> teleported) {
 		for (SceneNode node : state.nodes.values()) {
 			Track t = tracks.get(node.id);
 			if (t == null) {
@@ -65,6 +74,12 @@ final class NodeInterpolator {
 				continue;
 			}
 			if (unchanged(t.to, node)) {
+				continue;
+			}
+			if (teleported.contains(Integer.valueOf(node.id))) {
+				write(t.to, node);
+				System.arraycopy(t.to, 0, t.from, 0, FIELDS);
+				t.startedNanos = nowNanos - WINDOW_NANOS; // settled on arrival
 				continue;
 			}
 			// Re-base from where the node appears RIGHT NOW, not from the previous target —

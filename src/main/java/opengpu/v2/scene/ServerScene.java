@@ -284,9 +284,26 @@ public final class ServerScene {
 	}
 
 	public void setTransform(int nodeId, double x, double y, double rot, double sx, double sy) {
+		setTransform(nodeId, x, y, rot, sx, sy, false);
+	}
+
+	/**
+	 * @param teleport true to make clients SNAP to the new transform instead of interpolating
+	 *                 toward it — for a deliberate jump, which would otherwise slide across
+	 *                 the screen over one server tick.
+	 */
+	public void setTransform(int nodeId, double x, double y, double rot, double sx, double sy,
+			boolean teleport) {
 		requireNode(nodeId);
 		int mask = V2Wire.PROP_X | V2Wire.PROP_Y | V2Wire.PROP_ROT | V2Wire.PROP_SX | V2Wire.PROP_SY;
-		applyAndStage(new Delta.NodeProps(nodeId, mask, new double[] { x, y, rot, sx, sy }));
+		if (!teleport) {
+			applyAndStage(new Delta.NodeProps(nodeId, mask, new double[] { x, y, rot, sx, sy }));
+			return;
+		}
+		// Values follow ASCENDING BIT ORDER, which is how DeltaApplier reads them back;
+		// PROP_TELEPORT is the highest bit, so its value goes last.
+		applyAndStage(new Delta.NodeProps(nodeId, mask | V2Wire.PROP_TELEPORT,
+				new double[] { x, y, rot, sx, sy, 1 }));
 	}
 
 	public void setZ(int nodeId, int z) {

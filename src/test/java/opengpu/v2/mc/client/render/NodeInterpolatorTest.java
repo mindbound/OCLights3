@@ -162,6 +162,46 @@ public class NodeInterpolatorTest {
 	}
 
 	@Test
+	public void aTeleportSnapsInsteadOfSliding() {
+		// A deliberate jump must not crawl to its destination over a server tick — that is
+		// worse than the stepping interpolation was introduced to fix.
+		NodeInterpolator interp = new NodeInterpolator();
+		SceneNode n = node(1, 0, 0);
+		interp.capture(stateWith(n), 0L);
+
+		n.x = 400;
+		interp.capture(stateWith(n), WINDOW,
+				java.util.Collections.singleton(Integer.valueOf(1)));
+
+		double[] out = new double[5];
+		interp.transformOf(n, WINDOW, out);
+		assertEquals("teleport must arrive immediately", 400, out[0], 1e-9);
+		interp.transformOf(n, WINDOW + WINDOW / 2, out);
+		assertEquals(400, out[0], 1e-9);
+		assertFalse("a teleport leaves nothing in flight", interp.active(WINDOW));
+	}
+
+	@Test
+	public void anUnflaggedNodeStillInterpolatesWhenAnotherTeleports() {
+		// The flag is per node, so one sprite jumping must not snap the rest of the scene.
+		NodeInterpolator interp = new NodeInterpolator();
+		SceneNode jumper = node(1, 0, 0);
+		SceneNode slider = node(2, 0, 0);
+		interp.capture(stateWith(jumper, slider), 0L);
+
+		jumper.x = 400;
+		slider.x = 100;
+		interp.capture(stateWith(jumper, slider), WINDOW,
+				java.util.Collections.singleton(Integer.valueOf(1)));
+
+		double[] out = new double[5];
+		interp.transformOf(jumper, WINDOW + WINDOW / 2, out);
+		assertEquals(400, out[0], 1e-9);
+		interp.transformOf(slider, WINDOW + WINDOW / 2, out);
+		assertEquals("the unflagged node must still lerp", 50, out[0], 1e-6);
+	}
+
+	@Test
 	public void scaleInterpolatesToo() {
 		NodeInterpolator interp = new NodeInterpolator();
 		SceneNode n = new SceneNode(1, V2Wire.NODE_SPRITE, 1);

@@ -129,6 +129,63 @@ public class SceneGraphTest {
 	}
 
 	@Test
+	public void theTeleportFlagSurvivesTheCodecAndReachesTheMirror() throws Exception {
+		// A wire-format change: PROP_TELEPORT widens KNOWN_PROPS_MASK, and BatchCodec derives
+		// the value count from Integer.bitCount(mask) and REJECTS unknown mask bits outright.
+		// So this proves both that the bit decodes and that its value keeps the cursor aligned
+		// — a misalignment would silently corrupt every field after it.
+		ServerScene server = new ServerScene(SCENE);
+		SceneMirror mirror = new SceneMirror(SCENE);
+		server.setCurrentTick(1);
+		withDisplay(server);
+		byte[] px = new byte[4 * 4 * 4];
+		int sprite = server.createNode(V2Wire.NODE_SPRITE, server.createTexture(4, 4, px));
+		ship(server, mirror);
+		mirror.clearDirty();
+
+		server.setCurrentTick(2);
+		server.setTransform(sprite, 42.0, 24.0, 0.5, 2.0, 3.0, true);
+		ship(server, mirror);
+
+		assertTrue("teleport broke convergence", server.state().contentEquals(mirror.state()));
+		SceneNode n = mirror.state().nodes.get(sprite);
+		assertEquals("values must survive the extra mask bit", 42.0, n.x, 1e-9);
+		assertEquals(24.0, n.y, 1e-9);
+		assertEquals(0.5, n.rot, 1e-9);
+		assertEquals(2.0, n.sx, 1e-9);
+		assertEquals(3.0, n.sy, 1e-9);
+		assertTrue("the mirror must report the node as teleported",
+				mirror.teleportedNodes().contains(Integer.valueOf(sprite)));
+	}
+
+	@Test
+	public void anOrdinaryTransformIsNotFlagged() throws Exception {
+		ServerScene server = new ServerScene(SCENE);
+		SceneMirror mirror = new SceneMirror(SCENE);
+		server.setCurrentTick(1);
+		withDisplay(server);
+		byte[] px = new byte[4 * 4 * 4];
+		int sprite = server.createNode(V2Wire.NODE_SPRITE, server.createTexture(4, 4, px));
+		ship(server, mirror);
+		mirror.clearDirty();
+
+		server.setCurrentTick(2);
+		server.setTransform(sprite, 10, 10, 0, 1, 1);
+		ship(server, mirror);
+		assertFalse("an animated move must interpolate, not snap",
+				mirror.teleportedNodes().contains(Integer.valueOf(sprite)));
+
+		// And the set must not accumulate across frames.
+		server.setCurrentTick(3);
+		server.setTransform(sprite, 20, 20, 0, 1, 1, true);
+		ship(server, mirror);
+		assertTrue(mirror.teleportedNodes().contains(Integer.valueOf(sprite)));
+		mirror.clearDirty();
+		assertTrue("clearDirty must clear the teleport set",
+				mirror.teleportedNodes().isEmpty());
+	}
+
+	@Test
 	public void nodeCountIsBounded() {
 		// Without this the id space (2^31) is the only bound, and every node costs server
 		// memory, snapshot bytes to every watcher, and per-frame client work.
