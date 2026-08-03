@@ -37,6 +37,9 @@ public final class ServerScene {
 	 * batches the receiver must reject.
 	 */
 	private int stagedWriteBytes;
+	/** Canvas-submit payload charged this TICK and to the current unsealed BATCH. */
+	private int tickSubmitBytes;
+	private int stagedSubmitBytes;
 	private int writeBudgetBytes = V2Wire.MAX_WRITE_BYTES_PER_TICK;
 	private int manifestGen;
 	private final ArrayList<Delta> staged = new ArrayList<Delta>();
@@ -100,6 +103,7 @@ public final class ServerScene {
 		if (tick != currentTick) {
 			currentTick = tick;
 			tickWriteBytes = 0;
+			tickSubmitBytes = 0;
 		}
 		this.writeBudgetBytes = Math.max(0, writeBudgetBytes);
 	}
@@ -322,11 +326,93 @@ public final class ServerScene {
 				new double[] { (double) (argb & 0xFFFFFFFFL) }));
 	}
 
+	/**
+	 * Apply a submitted command list to a canvas under the per-tick byte allowance.
+	 *
+	 * Charged at BOTH the tick and the batch, exactly as texture writes are, and for the same
+	 * reason: the two counters coincide in the common path but diverge whenever a tick
+	 * boundary passes without a seal, or a seal happens without a tick change (saveBoundary
+	 * does that). One counter cannot bound both, and it is the BATCH bound that keeps a tick's
+	 * payload inside what the decoder will accept.
+	 *
+	 * @return false when the allowance is exhausted — the caller decides whether to retry.
+	 */
+	public boolean submitCanvas(int resId, List<CanvasCommand> commands, boolean publish, int bytes) {
+		ResourceInfo res = state.resources.get(resId);
+		if (res == null || res.type != V2Wire.RES_CANVAS)
+			throw new IllegalStateException("Not a canvas: " + resId);
+		if (tickSubmitBytes + bytes > V2Wire.MAX_SUBMIT_BYTES)
+			return false;
+		if (stagedSubmitBytes + bytes > V2Wire.MAX_SUBMIT_BYTES)
+			return false;
+		// Charge AFTER the apply, not before: a list that overruns the canvas command cap throws
+		// out of DeltaApplier with nothing applied and nothing staged, and a call that changed
+		// no state must not have spent the tick's allowance either.
+		if (publish) {
+			canvasPublish(resId, commands);
+		} else {
+			canvasAppend(resId, commands);
+		}
+		tickSubmitBytes += bytes;
+		stagedSubmitBytes += bytes;
+		return true;
+	}
+
+	/** Bytes of canvas-submit payload still allowed this tick. */
+	public int submitBudgetRemaining() {
+		return Math.max(0, Math.min(V2Wire.MAX_SUBMIT_BYTES - tickSubmitBytes,
+				V2Wire.MAX_SUBMIT_BYTES - stagedSubmitBytes));
+	}
+
+	/**
+	 * Encoded command bytes this scene currently holds across every canvas.
+	 *
+	 * O(canvases), not O(commands): each canvas maintains its own running total, so this stays
+	 * cheap enough to check on a path that runs every tick.
+	 */
+	public long standingCommandBytes() {
+		long total = 0;
+		for (ResourceInfo res : state.resources.values()) {
+			if (res.type == V2Wire.RES_CANVAS && res.canvas != null) {
+				total += res.canvas.encodedBytes();
+			}
+		}
+		return total;
+	}
+
+	/**
+	 * Bytes of standing command list this scene can still take.
+	 *
+	 * Conservative on the append path, deliberately: compaction may shrink the list after the
+	 * fact, but the check has to be made before applying and has to reach the same verdict on
+	 * every mirror, so it projects the worst case exactly as SceneCanvas's own cap precheck
+	 * does.
+	 */
+	public long standingBudgetRemaining() {
+		return Math.max(0, V2Wire.MAX_STANDING_COMMAND_BYTES - standingCommandBytes());
+	}
+
+	private void checkStandingBudget(int resId, List<CanvasCommand> commands, boolean publish) {
+		long incoming = 0;
+		for (CanvasCommand cmd : commands) {
+			incoming += cmd.encodedBytes();
+		}
+		ResourceInfo res = state.resources.get(resId);
+		// A publish REPLACES the target's list, so only an append adds to what is already there.
+		long freed = publish && res != null && res.canvas != null ? res.canvas.encodedBytes() : 0;
+		if (standingCommandBytes() - freed + incoming > V2Wire.MAX_STANDING_COMMAND_BYTES) {
+			throw new IllegalStateException("scene canvas commands would exceed "
+					+ V2Wire.MAX_STANDING_COMMAND_BYTES + " bytes; publish over a canvas or free one");
+		}
+	}
+
 	public void canvasAppend(int resId, List<CanvasCommand> commands) {
+		checkStandingBudget(resId, commands, false);
 		applyAndStage(new Delta.CanvasAppend(resId, commands));
 	}
 
 	public void canvasPublish(int resId, List<CanvasCommand> commands) {
+		checkStandingBudget(resId, commands, true);
 		applyAndStage(new Delta.CanvasPublish(resId, commands));
 	}
 
@@ -345,6 +431,7 @@ public final class ServerScene {
 		SceneBatch batch = new SceneBatch(sceneId, epoch, seq, currentTick, staged);
 		staged.clear();
 		stagedWriteBytes = 0;
+		stagedSubmitBytes = 0;
 		return batch;
 	}
 

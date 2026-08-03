@@ -1359,6 +1359,242 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 	// parent field and there is no PROP_PARENT, so a group can hold nothing — transform
 	// parenting is Stage B. Exposing it now would ship a call that provably does nothing.
 
+	/**
+	 * Draw into a canvas by submitting a whole packed command list in one call.
+	 *
+	 * The immediate-mode callbacks stay hardwired to the display canvas and are NOT
+	 * generalised, which is the decision this whole design turns on. The recorder is six
+	 * interacting mutable fields — recording, pendingPresent, autopresent, pushDepth,
+	 * publishedTailDepth, colour — and that machine has already produced four shipped defects
+	 * here: present() not resetting pushDepth, record()'s cap ignoring pendingPresent, the
+	 * mode not being persisted, and setResolution needing its own wipe of the depth pair.
+	 * Making it per-canvas would multiply that by N and add a new persisted format for it.
+	 * Submitting a finished list instead means offscreen canvases add NO server-side mode
+	 * state at all: the buffer, colour and transform depth live in the caller's own code.
+	 *
+	 * The target is an argument rather than a mode, because a call may execute TWICE. OC
+	 * charges the call budget BEFORE entering the body, so a refused call is re-invoked
+	 * verbatim on the next tick's synchronized replay — with every other computer on the
+	 * network having run in between. Any "current target" a retry cannot reconstruct from its
+	 * own arguments would land the replayed draw in a stranger's canvas, with both sides
+	 * agreeing and nothing detecting it.
+	 */
+	@Callback(direct = true, limit = 32, doc = "function(canvasId:number, mode:string, commands:string[, epoch:number]):boolean -- Apply a packed command list to a canvas. mode is \"publish\" (replace the frame) or \"append\" (add, with compaction). Returns false when this tick's allowance is spent; pass epoch from getEpoch() to reject a stale handle.")
+	public Object[] canvasSubmit(Context context, Arguments args) throws Exception {
+		// Everything cheap first, with NO lock and NO state touched — writeRegion's order.
+		// A payload that is going to be rejected must be rejected before it can half-apply.
+		int canvasId = args.checkInteger(0);
+		String mode = args.checkString(1);
+		boolean publish;
+		if ("publish".equals(mode)) {
+			publish = true;
+		} else if ("append".equals(mode)) {
+			publish = false;
+		} else {
+			throw new Exception("mode must be \"publish\" or \"append\", got \"" + mode + "\"");
+		}
+		byte[] payload = args.checkByteArray(2);
+		if (payload.length > V2Wire.MAX_SUBMIT_BYTES) {
+			throw new Exception("command list too large (" + payload.length + " bytes, max "
+					+ V2Wire.MAX_SUBMIT_BYTES + "); submit fewer commands or append in parts");
+		}
+
+		// FIRST lock: resolve the target only far enough to learn its command cap, so the decode
+		// below can be bounded by it. The byte cap alone does NOT bound command COUNT — the
+		// zero-arity ops are one byte each, so a legal 64 KiB payload can declare 65,532
+		// commands, sixteen times the default canvas cap, and every one of them would be
+		// allocated and scanned before anything noticed. Bounding the decode by the cap the
+		// canvas will actually enforce rejects that after four bytes and zero allocation.
+		//
+		// This resolution is advisory: a co-tenant may free or recreate the canvas before the
+		// second lock, so everything is re-checked there. It cannot go wrong in the unsafe
+		// direction — a stale cap only ever bounds the decode, never admits a write.
+		int commandCap;
+		synchronized (sceneLock) {
+			requireScene();
+			if (args.count() > 3 && args.checkInteger(3) != scene.epoch()) {
+				throw new Exception("stale canvas handle: the scene was re-created");
+			}
+			commandCap = requireSubmittableCanvasLocked(canvasId).canvas.commandCap;
+		}
+
+		List<CanvasCommand> commands;
+		try {
+			commands = opengpu.v2.protocol.BatchCodec.decodeCommandList(payload, commandCap);
+		} catch (opengpu.v2.protocol.CodecException e) {
+			throw new Exception("malformed command list: " + e.getMessage());
+		}
+		if (commands.isEmpty()) {
+			throw new Exception("command list is empty");
+		}
+		// The immediate-mode path checks every coordinate; the submit path must too, or it is
+		// simply the unchecked door into the same canvas. A NaN would ride the wire, land in
+		// every mirror identically (so no divergence detector fires) and poison the replay.
+		for (int i = 0; i < commands.size(); i++) {
+			double[] a = commands.get(i).args;
+			for (int j = 0; j < a.length; j++) {
+				if (Double.isNaN(a[j]) || Double.isInfinite(a[j])) {
+					throw new Exception("command " + (i + 1) + " has a non-finite argument");
+				}
+			}
+		}
+
+		synchronized (sceneLock) {
+			requireScene();
+			if (args.count() > 3 && args.checkInteger(3) != scene.epoch()) {
+				throw new Exception("stale canvas handle: the scene was re-created");
+			}
+			ResourceInfo res = requireSubmittableCanvasLocked(canvasId);
+			// Restate SceneCanvas's cap here rather than letting its IllegalStateException out.
+			// Its message names fill()/clear()/present(), which are hardwired to the DISPLAY
+			// canvas — so for the only callers that can reach it (submits are refused on the
+			// display canvas) the advice is not merely unhelpful, it is impossible to follow.
+			// The remedy for a wedged offscreen canvas is a publish, so say that.
+			int standing = publish ? 0 : res.canvas.visibleCommands().size();
+			if (standing + commands.size() > res.canvas.commandCap) {
+				throw new Exception("canvas " + canvasId + " holds " + standing + " of "
+						+ res.canvas.commandCap + " commands and cannot take " + commands.size()
+						+ " more; submit with \"publish\" to replace the frame instead");
+			}
+			// Same restatement for the scene-wide standing byte budget. This one bounds what a
+			// RESYNC SNAPSHOT carries to every client entering range and what the save writes to
+			// disk — a total that nothing bounded before this call existed, because until now no
+			// code path could put a command into a non-display canvas.
+			long incoming = 0;
+			for (CanvasCommand cmd : commands) {
+				incoming += cmd.encodedBytes();
+			}
+			long freed = publish ? res.canvas.encodedBytes() : 0;
+			if (scene.standingCommandBytes() - freed + incoming > V2Wire.MAX_STANDING_COMMAND_BYTES) {
+				throw new Exception("this scene's canvases already hold "
+						+ scene.standingCommandBytes() + " of " + V2Wire.MAX_STANDING_COMMAND_BYTES
+						+ " command bytes; publish a smaller frame over a canvas, or free one");
+			}
+			// Resolve texture refs here for a message that names the id, rather than letting
+			// DeltaApplier reject the whole batch later with a generic validation failure.
+			for (CanvasCommand cmd : commands) {
+				if (cmd.op == V2Wire.OP_DRAW_TEXTURE || cmd.op == V2Wire.OP_DRAW_TEXTURE_SUB) {
+					int ref = (int) cmd.args[0];
+					ResourceInfo src = scene.state().resources.get(ref);
+					if (src == null || src.type != V2Wire.RES_TEXTURE) {
+						throw new Exception("drawTexture references unknown texture " + ref);
+					}
+				}
+			}
+			if (scene.submitBudgetRemaining() < payload.length) {
+				// Exactly writeRegion's shape, and for the reason its comment gives: burning the
+				// call budget makes OC re-run this call next tick, transparently to Lua.
+				//
+				// An earlier draft returned false immediately, reasoning that replaying a whole
+				// frame could publish something the program had superseded. That was wrong — the
+				// program is BLOCKED on this call and has run no further code, so there is
+				// nothing to supersede. It also left a refusal costing the caller nothing, which
+				// made the allowance pace no work at all: a refused submit still paid the full
+				// decode, and a computer could spend its whole call budget on refusals.
+				//
+				// consumeCallBudget is a NO-OP during the synchronized replay, so the replay must
+				// answer honestly instead of falling through.
+				context.consumeCallBudget(Double.MAX_VALUE);
+				if (scene.submitBudgetRemaining() < payload.length) {
+					return new Object[] { false, "canvas submit allowance spent this tick" };
+				}
+			}
+			if (!scene.submitCanvas(canvasId, commands, publish, payload.length)) {
+				return new Object[] { false, "canvas submit allowance spent this tick" };
+			}
+			chunkDirty = true;
+			return new Object[] { true };
+		}
+	}
+
+	/** The three checks a submit target must pass, in one place so both lock phases agree. */
+	private ResourceInfo requireSubmittableCanvasLocked(int canvasId) throws Exception {
+		ResourceInfo res = scene.state().resources.get(canvasId);
+		if (res == null) {
+			throw new Exception("unknown canvas id " + canvasId);
+		}
+		if (res.type != V2Wire.RES_CANVAS || res.canvas == null) {
+			throw new Exception("id " + canvasId + " is a texture, not a canvas; use writeRegion");
+		}
+		// The display canvas belongs to the recorder, and a submit routes AROUND it. This tick's
+		// immediate draws are still sitting in `recording`, and a present() puts a whole frame in
+		// `pendingPresent`; flushRecordingLocked then publishes that frame over the submitted
+		// one. The call would have returned true and the picture would simply never appear —
+		// agreed on identically by server and every mirror, so no divergence check can see it.
+		// freeCanvas refuses this id for the same reason. Nothing is lost by refusing: the
+		// immediate path already coalesces a tick's draws into ONE append.
+		if (canvasId == implicitCanvasRes) {
+			throw new Exception("cannot submit to the display canvas; use the drawing calls, "
+					+ "or submit to an offscreen canvas and show it with createCanvasNode");
+		}
+		return res;
+	}
+
+	/**
+	 * The op alphabet canvasSubmit speaks, keyed by the immediate-mode call it mirrors.
+	 *
+	 * Without this a program packing a command list would have to hardcode the numeric op ids,
+	 * which are wire-format internals — the one part of this API that a caller cannot discover
+	 * by any other means. Hardcoding them would also make every packer silently wrong the first
+	 * time an op is inserted rather than appended. The arity travels with the id for the same
+	 * reason: it is the other half of the packing rule, and splitting them across a doc and a
+	 * call is how the two drift.
+	 */
+	@Callback(direct = true, doc = "function():table -- The canvas ops canvasSubmit accepts: name -> {op = id, args = count}. drawText additionally carries a trailing writeUTF string.")
+	public Object[] canvasOps(Context context, Arguments args) throws Exception {
+		String[] names = {
+				"fill", "plot", "line", "rectangle", "filledRectangle", "triangle",
+				"filledTriangle", "oval", "filledOval", "clearRectangle", "drawText",
+				"drawTexture", "drawTextureSub", "setColor", "translate", "rotate",
+				"rotateAround", "scale", "push", "pop", "origin" };
+		byte[] ops = {
+				V2Wire.OP_FILL, V2Wire.OP_PLOT, V2Wire.OP_LINE, V2Wire.OP_RECT,
+				V2Wire.OP_FILL_RECT, V2Wire.OP_TRIANGLE, V2Wire.OP_FILL_TRIANGLE, V2Wire.OP_OVAL,
+				V2Wire.OP_FILL_OVAL, V2Wire.OP_CLEAR_RECT, V2Wire.OP_DRAW_TEXT,
+				V2Wire.OP_DRAW_TEXTURE, V2Wire.OP_DRAW_TEXTURE_SUB, V2Wire.OP_SET_COLOR,
+				V2Wire.OP_TRANSLATE, V2Wire.OP_ROTATE, V2Wire.OP_ROTATE_AROUND, V2Wire.OP_SCALE,
+				V2Wire.OP_PUSH, V2Wire.OP_POP, V2Wire.OP_ORIGIN };
+		if (names.length != ops.length) {
+			throw new Exception("canvasOps table is malformed");
+		}
+		java.util.Map<String, Object> out = new java.util.LinkedHashMap<String, Object>();
+		for (int i = 0; i < names.length; i++) {
+			java.util.Map<String, Integer> entry = new java.util.LinkedHashMap<String, Integer>();
+			entry.put("op", Integer.valueOf(ops[i]));
+			entry.put("args", Integer.valueOf(V2Wire.canvasOpArgCount(ops[i])));
+			out.put(names[i], entry);
+		}
+		// Fail loudly rather than under-report. An op added to V2Wire but not listed here would
+		// otherwise be a silent hole: submit accepts it, no program can discover it, and nothing
+		// anywhere says so. This is deterministic, so it trips the first time anyone calls it.
+		for (int op = 1; V2Wire.canvasOpArgCount(op) >= 0; op++) {
+			boolean listed = false;
+			for (int i = 0; i < ops.length; i++) {
+				listed |= ops[i] == op;
+			}
+			if (!listed) {
+				throw new Exception("canvas op " + op + " is missing from canvasOps");
+			}
+		}
+		return new Object[] { out };
+	}
+
+	@Callback(direct = true, doc = "function():number -- This scene's incarnation epoch. Pass it to canvasSubmit to reject a handle from a previous scene.")
+	public Object[] getEpoch(Context context, Arguments args) throws Exception {
+		synchronized (sceneLock) {
+			requireScene();
+			return new Object[] { scene.epoch() };
+		}
+	}
+
+	@Callback(direct = true, doc = "function():number -- Bytes of canvasSubmit payload still allowed this tick.")
+	public Object[] getSubmitBudget(Context context, Arguments args) throws Exception {
+		synchronized (sceneLock) {
+			requireScene();
+			return new Object[] { scene.submitBudgetRemaining() };
+		}
+	}
+
 	@Callback(direct = true, limit = 8, doc = "function(width:number, height:number[, commandCap:number]):number -- Allocate an offscreen canvas; returns its resource id. Draw into it, or use it as a drawTexture/sprite source.")
 	public Object[] createCanvas(Context context, Arguments args) throws Exception {
 		int w = args.checkInteger(0), h = args.checkInteger(1);

@@ -345,10 +345,56 @@ public final class BatchCodec {
 		}
 	}
 
+	/**
+	 * Decode a standalone packed command list — the payload Lua hands to canvasSubmit.
+	 *
+	 * Deliberately the SAME reader the batch codec uses, so the format a program packs is
+	 * definitionally the format the wire carries; a second parser would be a second thing to
+	 * keep in step. Trailing bytes are rejected for the same reason the batch decoder rejects
+	 * them: a payload the sender thought meant something else is not a payload to guess at.
+	 */
+	public static ArrayList<CanvasCommand> decodeCommandList(byte[] data) throws CodecException {
+		return decodeCommandList(data, V2Wire.MAX_COMMANDS);
+	}
+
+	/**
+	 * Decode a standalone command list, refusing more than {@code maxCommands} of them.
+	 *
+	 * The bound matters because a payload's BYTE length does not bound its command COUNT: the
+	 * zero-arity ops encode in one byte, so a 64 KiB list can declare 65,532 commands. Callers
+	 * pass the count the target will actually accept (a canvas's command cap), and because the
+	 * count is the first field on the wire the refusal costs one readInt and no allocation.
+	 */
+	public static ArrayList<CanvasCommand> decodeCommandList(byte[] data, int maxCommands)
+			throws CodecException {
+		if (data == null)
+			throw new CodecException("Command payload required");
+		try {
+			DataInputStream in = new DataInputStream(new java.io.ByteArrayInputStream(data));
+			ArrayList<CanvasCommand> commands = readCommands(in, maxCommands);
+			if (in.read() != -1)
+				throw new CodecException("Trailing data after command list");
+			return commands;
+		} catch (java.io.EOFException e) {
+			throw new CodecException("Truncated command list", e);
+		} catch (IOException e) {
+			throw new CodecException("Malformed command list", e);
+		} catch (IllegalArgumentException e) {
+			throw new CodecException("Malformed command list: " + e.getMessage(), e);
+		}
+	}
+
 	static ArrayList<CanvasCommand> readCommands(DataInputStream in) throws IOException, CodecException {
+		return readCommands(in, V2Wire.MAX_COMMANDS);
+	}
+
+	static ArrayList<CanvasCommand> readCommands(DataInputStream in, int maxCommands)
+			throws IOException, CodecException {
 		int count = in.readInt();
 		if (count < 0 || count > V2Wire.MAX_COMMANDS)
 			throw new CodecException("Command count out of range: " + count);
+		if (count > maxCommands)
+			throw new CodecException("Command count " + count + " exceeds the limit of " + maxCommands);
 		ArrayList<CanvasCommand> commands = new ArrayList<CanvasCommand>(Math.min(count, 4096));
 		for (int i = 0; i < count; i++) {
 			byte op = in.readByte();

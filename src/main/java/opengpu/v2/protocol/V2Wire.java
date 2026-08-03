@@ -62,6 +62,41 @@ public final class V2Wire {
 	 */
 	public static final int MAX_WRITE_BYTES_PER_TICK = 16384;
 
+	/**
+	 * Packed command bytes one canvasSubmit may carry, and the allowance per scene per tick.
+	 *
+	 * Its own bound, NOT the texture-write budget: these pace different things (command lists
+	 * versus pixel payloads) and reusing a neighbouring concept's number is how this codebase
+	 * has repeatedly produced bounds that were wrong for what they were bounding.
+	 *
+	 * Well under MAX_INFLATED_BYTES on purpose. Admission has to keep a tick's batch inside
+	 * what the DECODER will accept — a batch that overruns the decoder is rejected wholesale,
+	 * which loses the whole frame rather than throttling the caller.
+	 */
+	public static final int MAX_SUBMIT_BYTES = 65536;
+
+	/**
+	 * Encoded command bytes a scene may HOLD across all its canvases at once.
+	 *
+	 * MAX_SUBMIT_BYTES paces the rate commands arrive; this bounds the standing total, and the
+	 * two are genuinely different quantities. Nothing bounded the total before canvasSubmit
+	 * existed, but only because it was vacuous: no code path could put a command into a
+	 * non-display canvas, so every offscreen canvas was provably empty and the display
+	 * canvas's own commandCap was the whole story.
+	 *
+	 * The standing total is what a RESYNC SNAPSHOT carries, in full, to every client entering
+	 * range — and what the save writes to disk on every autosave. The VRAM budget does bound
+	 * it, but only at ~26 MB, because CANVAS_SLOT_COST prices a slot at 32 bytes as a proxy
+	 * for the client's FBO while a filled slot costs up to 57 bytes on the wire (and an
+	 * OP_DRAW_TEXT slot far more). Pricing VRAM by wire cost would be the same borrowed-bound
+	 * mistake in the other direction, so the wire total gets its own explicit budget.
+	 *
+	 * 2 MiB: comfortably over any plausible real scene (a full 4096-command canvas of the
+	 * widest op is ~233 KB) and comfortably under MAX_INFLATED_BYTES, which the snapshot must
+	 * also satisfy.
+	 */
+	public static final int MAX_STANDING_COMMAND_BYTES = 2 * 1024 * 1024;
+
 	/** Self-describing persisted body blob: 'OGPB'. */
 	public static final int PERSIST_BODY_MAGIC = 0x4F475042;
 	public static final short PERSIST_BODY_FORMAT = 1;

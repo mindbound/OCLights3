@@ -50,6 +50,20 @@ public final class CanvasCommand {
 		return (int) v;
 	}
 
+	/**
+	 * An UPPER BOUND on this command's encoded size, in the layout BatchCodec.writeCommands
+	 * produces: one op byte, eight bytes per numeric argument, and for OP_DRAW_TEXT a
+	 * writeUTF (two length bytes plus the string).
+	 *
+	 * Deliberately an over-estimate for the string: writeUTF emits Java MODIFIED UTF-8, which
+	 * spends one byte on most ASCII but up to three on anything else, and this figure feeds an
+	 * admission check. A bound that could understate would admit a frame the transport then
+	 * refuses, which is the failure it exists to prevent, so it counts three bytes a char.
+	 */
+	public int encodedBytes() {
+		return 1 + 8 * args.length + (text == null ? 0 : 2 + 3 * text.length());
+	}
+
 	public static CanvasCommand of(byte op, double... args) {
 		return new CanvasCommand(op, args, null);
 	}

@@ -38,6 +38,15 @@ public final class SceneCanvas {
 	private int colorR = 255, colorG = 255, colorB = 255, colorA = 255;
 	private boolean transformTouched = false;
 	private int pushDepth = 0;
+	/**
+	 * Running encoded size of {@link #visible}, maintained at every point that list changes.
+	 *
+	 * Kept incrementally rather than computed on demand because the caller that needs it is an
+	 * admission check on a path that runs every tick, and the list can hold thousands of
+	 * commands. The commandCap bounds the COUNT, but a count says nothing about size: an
+	 * OP_DRAW_TEXT slot can carry MAX_TEXT_CHARS while an OP_FILL slot is one byte.
+	 */
+	private long encodedBytes = 0;
 
 	public SceneCanvas(int width, int height, int commandCap) {
 		if (width <= 0 || height <= 0)
@@ -83,6 +92,12 @@ public final class SceneCanvas {
 			return;
 		}
 		visible.add(cmd);
+		encodedBytes += cmd.encodedBytes();
+	}
+
+	/** Encoded size of the visible list, an upper bound. See {@link #encodedBytes}. */
+	public long encodedBytes() {
+		return encodedBytes;
 	}
 
 	/**
@@ -120,8 +135,10 @@ public final class SceneCanvas {
 
 	private void truncateTo(CanvasCommand covering) {
 		visible.clear();
+		encodedBytes = 0;
 		visible.add(CanvasCommand.of(V2Wire.OP_SET_COLOR, colorR, colorG, colorB, colorA));
 		visible.add(covering);
+		encodedBytes = visible.get(0).encodedBytes() + covering.encodedBytes();
 		transformTouched = false;
 		pushDepth = 0;
 	}
@@ -131,6 +148,7 @@ public final class SceneCanvas {
 			throw new IllegalStateException(
 					"canvas command list full (" + commandCap + "); reduce the published frame");
 		visible.clear();
+		encodedBytes = 0;
 		colorR = 255;
 		colorG = 255;
 		colorB = 255;
@@ -150,6 +168,7 @@ public final class SceneCanvas {
 				trackTransform(cmd.op);
 			}
 			visible.add(cmd);
+			encodedBytes += cmd.encodedBytes();
 		}
 	}
 
@@ -164,6 +183,7 @@ public final class SceneCanvas {
 	public SceneCanvas copy() {
 		SceneCanvas c = new SceneCanvas(width, height, commandCap);
 		c.visible.addAll(visible);
+		c.encodedBytes = encodedBytes;
 		c.colorR = colorR;
 		c.colorG = colorG;
 		c.colorB = colorB;
