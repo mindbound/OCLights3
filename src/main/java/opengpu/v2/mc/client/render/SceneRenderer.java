@@ -58,6 +58,8 @@ public final class SceneRenderer {
 		 */
 		int failedWidth = -1;
 		int failedHeight = -1;
+		/** Smooths node transforms across the 20 tps channel; see NodeInterpolator. */
+		final NodeInterpolator interp = new NodeInterpolator();
 		final Map<Integer, TexEntry> textures = new HashMap<Integer, TexEntry>();
 	}
 
@@ -281,7 +283,18 @@ public final class SceneRenderer {
 			gl.failedWidth = -1;
 			gl.failedHeight = -1;
 		}
-		if (!mirror.isDirty() && !gl.uploadDirty && gl.everRendered) {
+		long now = System.nanoTime();
+		// Fold a freshly applied batch into the interpolator BEFORE deciding whether to draw:
+		// capture() is what starts a node moving, so skipping it would drop the motion
+		// entirely on the frame the batch lands.
+		if (mirror.isDirty()) {
+			gl.interp.capture(mirror.state(), now);
+		}
+		// Re-render while anything is still mid-flight, not only when a batch arrived — that
+		// is the whole point, since batches land at 20 Hz and we draw at 60+. A settled scene
+		// still short-circuits here, so a static display costs nothing per frame.
+		boolean interpolating = gl.interp.active(now);
+		if (!mirror.isDirty() && !gl.uploadDirty && gl.everRendered && !interpolating) {
 			return;
 		}
 		Map<Integer, Integer> glMap = new HashMap<Integer, Integer>();
@@ -290,7 +303,7 @@ public final class SceneRenderer {
 		}
 		pass.begin(gl.fbo, gl.width, gl.height);
 		try {
-			canvasRenderer.renderScene(mirror.state(), gl.width, gl.height, glMap);
+			canvasRenderer.renderScene(mirror.state(), gl.width, gl.height, glMap, gl.interp, now);
 		} finally {
 			pass.end();
 		}

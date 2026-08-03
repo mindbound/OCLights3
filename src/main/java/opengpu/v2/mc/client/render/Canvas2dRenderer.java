@@ -81,6 +81,18 @@ public final class Canvas2dRenderer {
 	private boolean texturing;
 
 	public void renderScene(SceneState state, int width, int height, Map<Integer, Integer> glTextures) {
+		renderScene(state, width, height, glTextures, null, 0L);
+	}
+
+	/**
+	 * As above, but with node transforms smoothed by {@code interp} as of {@code nowNanos}.
+	 * A null interpolator draws nodes at their raw transforms (the pre-interpolation path,
+	 * kept for tests and for any caller that wants the settled state).
+	 */
+	public void renderScene(SceneState state, int width, int height, Map<Integer, Integer> glTextures,
+			NodeInterpolator interp, long nowNanos) {
+		this.interp = interp;
+		this.interpNanos = nowNanos;
 		// This renderer is shared across passes, so the texturing shadow must be re-synced
 		// with real GL at every entry — never inherited from the previous scene's tail.
 		GL11.glDisable(GL11.GL_TEXTURE_2D);
@@ -117,11 +129,22 @@ public final class Canvas2dRenderer {
 		}
 	}
 
+	/** Interpolation source for the current renderScene call; null = draw raw transforms. */
+	private NodeInterpolator interp;
+	private long interpNanos;
+	private final double[] xform = new double[5];
+
 	private void beginNode(SceneNode sceneNode) {
+		double nx = sceneNode.x, ny = sceneNode.y, nrot = sceneNode.rot;
+		double nsx = sceneNode.sx, nsy = sceneNode.sy;
+		if (interp != null) {
+			interp.transformOf(sceneNode, interpNanos, xform);
+			nx = xform[0]; ny = xform[1]; nrot = xform[2]; nsx = xform[3]; nsy = xform[4];
+		}
 		node.identity();
-		node.translate(sceneNode.x, sceneNode.y);
-		node.rotate(sceneNode.rot);
-		node.scale(sceneNode.sx, sceneNode.sy);
+		node.translate(nx, ny);
+		node.rotate(nrot);
+		node.scale(nsx, nsy);
 		local.identity();
 		stack.clear();
 		colR = 1; colG = 1; colB = 1; colA = 1;
