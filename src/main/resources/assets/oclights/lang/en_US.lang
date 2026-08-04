@@ -1,11 +1,3 @@
-tile.gpu.name=GPU
-tile.monitor.normal.name=Monitor
-tile.monitor.big.name=External Monitor
-tile.monitor.tablet.name=Tablet Transmitter
-tile.Light.name=Light
-tile.Advanced.Light.name=Advanced Light
-item.ram.name=Random Access Memory
-item.tablet.name=Tablet
 tile.gpu2.name=GPU (v2)
 tile.screen2.name=Screen (v2)
 itemGroup.OpenGPU=OpenGPU

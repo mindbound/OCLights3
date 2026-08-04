@@ -1,8 +1,0 @@
-package opengpu.gpu;
-
-import opengpu.CommandEnum;
-
-public class DrawCMD {
-	public Object[] args = new Object[0];
-	public CommandEnum cmd;
-}

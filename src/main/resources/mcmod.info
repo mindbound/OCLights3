@@ -2,18 +2,19 @@
   {
     "modid": "${modId}",
     "name": "${modName}",
-    "description": "OpenGPU adds GPU-driven pixel-graphics monitors and tablets for OpenComputers.",
+    "description": "GPU-driven pixel graphics for OpenComputers: draw to dedicated screens and multi-block screen walls from Lua.",
     "version": "${modVersion}",
     "mcversion": "${minecraftVersion}",
     "url": "https://github.com/mindbound/OCLights3",
     "updateUrl": "",
     "authorList": [
+      "mindbound",
       "ds84182",
       "Alekso56",
       "gamax92"
     ],
-    "credits": "OpenGPU revival fork (formerly OCLights3); based on OCLights2 / CCLights2 by ds84182 et al.",
-    "logoFile": "assets/oclights/textures/items/ram.png",
+    "credits": "Originally a revival of OCLights2 / CCLights2 by ds84182 et al.; the inherited pipeline has since been replaced in full. Uses OpenComputers (MIT) by Sangar.",
+    "logoFile": "assets/oclights/textures/blocks/gpufront.png",
     "screenshots": [],
     "dependencies": ["OpenComputers"]
   }

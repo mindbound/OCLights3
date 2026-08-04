@@ -1,14 +1,9 @@
 package opengpu;
 
-import java.io.File;
-import java.io.IOException;
-import java.nio.file.Files;
-
 import net.minecraft.block.Block;
 import net.minecraft.creativetab.CreativeTabs;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
-import net.minecraftforge.common.config.Configuration;
 
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.Logger;
@@ -20,11 +15,6 @@ import cpw.mods.fml.common.event.FMLPostInitializationEvent;
 import cpw.mods.fml.common.event.FMLPreInitializationEvent;
 import cpw.mods.fml.common.event.FMLServerStoppedEvent;
 import cpw.mods.fml.common.network.NetworkRegistry;
-import cpw.mods.fml.common.registry.GameRegistry;
-import cpw.mods.fml.common.network.simpleimpl.SimpleNetworkWrapper;
-import cpw.mods.fml.relauncher.Side;
-import opengpu.network.PacketHandler;
-import opengpu.network.PacketHandler.PacketMessage;
 import opengpu.v2.mc.net.V2Net;
 import opengpu.v2.mc.server.V2ServerRuntime;
 
@@ -40,32 +30,54 @@ public class OpenGPU {
 	@SidedProxy(serverSide = Tags.ROOT_PKG + ".CommonProxy", clientSide = Tags.ROOT_PKG + ".client.ClientProxy")
 	public static CommonProxy proxy;
 	
-	public static Block gpu,monitor,monitorBig,light,advancedlight,ttrans;
 	public static Block gpu2, screen2;
-	public static Item ram,tablet;
 	public static Logger logger;
 	
-	public static SimpleNetworkWrapper network = new SimpleNetworkWrapper(Tags.MOD_ID);
-	
+	/**
+	 * The creative tab both v2 blocks attach to.
+	 *
+	 * Its icon is resolved from whatever is actually registered rather than from a named field,
+	 * because a null icon here is a hard client crash and not a blank square: opening the tab
+	 * takes RenderItem into {@code ItemStack.getItemDamage()}, which dereferences the Item.
+	 * The tab used to point at the legacy tablet, so deleting that item would have crashed
+	 * every creative-mode client while compiling cleanly, passing every test and passing a
+	 * server-side CI smoke — none of those channels open a creative menu.
+	 */
 	public static CreativeTabs ocltab = new CreativeTabs(Tags.MOD_ID) {
+		private Item icon() {
+			// gpu2 is the mod's identity; fall back rather than assume any single registration
+			// survived, and default to a vanilla item so the icon can never be null.
+			if (gpu2 != null) {
+				Item fromBlock = Item.getItemFromBlock(gpu2);
+				if (fromBlock != null) {
+					return fromBlock;
+				}
+			}
+			if (screen2 != null) {
+				Item fromScreen = Item.getItemFromBlock(screen2);
+				if (fromScreen != null) {
+					return fromScreen;
+				}
+			}
+			return net.minecraft.init.Items.redstone;
+		}
+
 		@Override
 		public ItemStack getIconItemStack() {
 			this.getTranslatedTabLabel();
-			return new ItemStack(tablet, 1, 0);
+			return new ItemStack(icon(), 1, 0);
 		}
 
 		@Override
 		public Item getTabIconItem() {
-			return tablet;
+			return icon();
 		}
 	};
 
 	@Mod.EventHandler
 	public void preInit(FMLPreInitializationEvent event) {
-		// Config.parse logs through OpenGPU.logger on malformed values — assign it first.
 		logger = event.getModLog();
-		Config.loadConfig(new Configuration(migrateLegacyConfig(event)));
-		
+
 		proxy.registerBlocks();
 
 		V2Net.init();
@@ -80,58 +92,76 @@ public class OpenGPU {
 		V2ServerRuntime.get().onServerStopped();
 	}
 
-	/**
-	 * Earlier identities suggested differently-named config files (OCLights3.cfg, and
-	 * OCLights2.cfg before that). Copy the newest legacy file into place on first launch
-	 * so user settings survive the rename; copy rather than move so rolling back to an
-	 * older jar still finds its own config.
-	 */
-	private static File migrateLegacyConfig(FMLPreInitializationEvent event) {
-		File suggested = event.getSuggestedConfigurationFile();
-		if (!suggested.exists()) {
-			for (String legacy : new String[] { "OCLights3.cfg", "OCLights2.cfg" }) {
-				File old = new File(event.getModConfigurationDirectory(), legacy);
-				if (old.exists()) {
-					try {
-						Files.copy(old.toPath(), suggested.toPath());
-						logger.info("Migrated legacy config " + legacy + " to " + suggested.getName());
-					} catch (IOException e) {
-						logger.warn("Could not migrate legacy config " + legacy + "; using defaults", e);
-					}
-					break;
-				}
-			}
-		}
-		return suggested;
-	}
+	// There is deliberately no config any more. Config.java was 100% legacy — monitor sizes,
+	// recipe toggles, light block ids — and nothing in v2 ever read it, so the cut-over drops
+	// the file rather than leaving an empty one that implies settings exist. The rename-era
+	// migration that copied OCLights3.cfg/OCLights2.cfg into place goes with it. Add a config
+	// back when something actually needs one.
 
+	/**
+	 * Registration names of the legacy block/item set, which the Stage A cut-over deletes.
+	 *
+	 * The two light entries were never registered (their block in CommonProxy is commented
+	 * out), so they can only appear in an OCLights2-era world — covering them costs nothing.
+	 */
+	private static final java.util.Set<String> ABANDONED_REGISTRY_NAMES =
+			new java.util.HashSet<String>(java.util.Arrays.asList(
+					"OCLGPU", "OCLMonitor", "OCLBigMonitor", "OCLTTrans", "OCLRAM", "OCLTab",
+					"OCLLIGHT", "OCLADVLIGHT"));
+
+	/**
+	 * Abandon the deleted legacy block/item ids rather than letting FML treat them as damage.
+	 *
+	 * This is the single method that decides whether an existing world still loads after the
+	 * cut-over, and none of its failure modes are caught by javac, by the test suite (all of
+	 * which is v2-only) or by CI. The fields it used to remap onto are plain {@code Block} /
+	 * {@code Item} in this class, so deleting their registrations leaves them silently null and
+	 * still compiling — {@code light} and {@code advancedlight} are already in exactly that
+	 * state today.
+	 *
+	 * <h2>Why the names are abandoned and not remapped</h2>
+	 * OpenGPU is a separate mod, not an updated OCLights2, so it makes no promise to carry old
+	 * worlds. More sharply: remapping these onto {@code gpu_v2}/{@code screen_v2} would be
+	 * actively destructive. {@code GameData.processIdRematches} requires the re-registered id to
+	 * equal the old one, and in any world that already knows {@code gpu_v2} it cannot, so the
+	 * load aborts with "the world state is utterly corrupted". That trap passes on a test world
+	 * predating gpu_v2 and fails on every current one.
+	 *
+	 * <h2>Why the domain list is wider than it looks</h2>
+	 * These ids live under THREE domains: "OpenGPU:" for any world saved by a current jar, plus
+	 * the pre-rename "OCLights3:" and "OCLights2:". The version of this method before the
+	 * cut-over handled only the latter two and {@code continue}d on everything else — which
+	 * would have left every current world's own ids unhandled. Note also that FML writes the
+	 * whole registry snapshot into level.dat, so a world carries these ids whether or not a
+	 * block was ever placed.
+	 *
+	 * Unhandled is not a warning: singleplayer prompts and force-backs-up the world, a
+	 * dedicated server BLOCKS on a console query, and a client joining a server is refused the
+	 * handshake outright with no prompt at all.
+	 *
+	 * {@code ignore()} rather than {@code warn()}: both load, but warn() makes FML log its
+	 * "may cause world breakage" banner on every subsequent load, forever, for a condition that
+	 * is permanent and intended. Matched by name rather than by domain so that a genuinely
+	 * missing {@code gpu_v2} still surfaces loudly instead of being swallowed.
+	 */
 	@Mod.EventHandler
 	public void missingMappings(FMLMissingMappingsEvent event) {
-		// Worlds created before the OpenGPU rename store block/item ids under the
-		// "OCLights2" domain (original mod) or "OCLights3" (interim rename; same
-		// registration names). The disabled light blocks are intentionally not remapped.
+		// getAll(), not get(): get() filters to this mod's own domain and would silently skip
+		// the OCLights2:/OCLights3: entries in a pre-rename world.
 		for (FMLMissingMappingsEvent.MissingMapping mapping : event.getAll()) {
-			if (!mapping.name.startsWith("OCLights2:") && !mapping.name.startsWith("OCLights3:")) {
+			int colon = mapping.name.indexOf(':');
+			if (colon < 0) {
 				continue;
 			}
-			String name = mapping.name.substring(mapping.name.indexOf(':') + 1);
-			Block block = null;
-			Item item = null;
-			if (name.equals("OCLGPU")) block = gpu;
-			else if (name.equals("OCLMonitor")) block = monitor;
-			else if (name.equals("OCLBigMonitor")) block = monitorBig;
-			else if (name.equals("OCLTTrans")) block = ttrans;
-			else if (name.equals("OCLRAM")) item = ram;
-			else if (name.equals("OCLTab")) item = tablet;
-			if (mapping.type == GameRegistry.Type.BLOCK && block != null) {
-				mapping.remap(block);
-			} else if (mapping.type == GameRegistry.Type.ITEM) {
-				if (item == null && block != null) {
-					item = Item.getItemFromBlock(block);
-				}
-				if (item != null) {
-					mapping.remap(item);
-				}
+			String domain = mapping.name.substring(0, colon);
+			if (!domain.equals(Tags.MOD_ID) && !domain.equals("OCLights3")
+					&& !domain.equals("OCLights2")) {
+				continue;
+			}
+			if (ABANDONED_REGISTRY_NAMES.contains(mapping.name.substring(colon + 1))) {
+				logger.info("Abandoning removed legacy mapping " + mapping.name
+						+ " (" + mapping.type + ")");
+				mapping.ignore();
 			}
 		}
 	}
@@ -139,14 +169,8 @@ public class OpenGPU {
 	@Mod.EventHandler
 	public void load(FMLPostInitializationEvent event) {
 		proxy.registerRenderInfo();
-        NetworkRegistry.INSTANCE.registerGuiHandler(this, new GuiHandler());
-        network.registerMessage(PacketHandler.class, PacketMessage.class, 0, Side.CLIENT);
-        network.registerMessage(PacketHandler.class, PacketMessage.class, 1, Side.SERVER);
-	}
-
-	public static void debug(String debugmsg) {
-		if (Config.DEBUGS) {
-			logger.log(Level.INFO, debugmsg);
-		}
+		// v2 has its own channel (V2Net, "OpenGPUv2"); the legacy SimpleNetworkWrapper on the
+		// mod id died with the old protocol.
+		NetworkRegistry.INSTANCE.registerGuiHandler(this, new GuiHandler());
 	}
 }

@@ -1,16 +1,31 @@
 # OpenGPU
 
-OpenGPU is an open-source Minecraft 1.7.10 mod that adds a **GPU peripheral for
+OpenGPU is a Minecraft 1.7.10 mod that adds a **GPU peripheral for
 [OpenComputers](https://github.com/GTNewHorizons/OpenComputers)**: pixel-graphics rendering to
-dedicated monitors, multi-block external monitors, and remote tablets — in contrast to OC's
-built-in character-cell screens.
+dedicated screens and multi-block screen walls, driven from Lua — in contrast to OC's built-in
+character-cell screens.
 
-It is a revival fork of the abandoned **OCLights2** (itself an OpenComputers port of
+It began as a revival fork of the abandoned **OCLights2** (itself an OpenComputers port of
 [CCLights2](https://github.com/ds84182/CCLights2) by ds84182), built against the GT New Horizons
-fork of OpenComputers. Worlds from OCLights2 are remapped automatically.
+fork of OpenComputers. It is no longer that: the inherited pipeline was replaced wholesale by a
+new protocol, scene model and renderer, and the original code was removed in full.
 
-**Status:** early revival. See [docs/dev](docs/dev/README.md) for the project charter,
-architecture notes, the verified issues register, and the roadmap.
+**OpenGPU does not migrate OCLights2 worlds, and is not a drop-in replacement for it.** The
+legacy blocks and items no longer exist; their ids are abandoned on load. A world that contained
+them still loads, without a prompt, but those blocks are gone. Back up any save before opening it
+with OpenGPU. The same applies to saves from **OCLights3**, the working name used by early
+revival commits.
+
+**Status:** in development, and it makes no compatibility promises yet — the Lua API is still
+moving.
+
+## Requirements
+
+- Minecraft 1.7.10 with Forge, and OpenComputers (GTNH fork).
+- **Framebuffer objects must be available and enabled.** This is a hard requirement with no
+  software fallback. FBOs are vanilla functionality, not a dependency on any other mod, but note
+  they can be switched off in Video Settings — if screens stay blank, check there first; the mod
+  says which of the two it is in chat and in the log.
 
 ## Building
 
@@ -24,8 +39,3 @@ are provisioned automatically):
 ## License
 
 [MMPL-1.0](LICENSE.md), continued from CCLights2/OCLights2.
-
-## Naming
-
-Earlier revival commits used the working name **OCLights3** before the project settled on
-OpenGPU; saves from that interim modid are remapped automatically, same as OCLights2 worlds.

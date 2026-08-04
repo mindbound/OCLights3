@@ -65,6 +65,8 @@ public final class SceneRenderer {
 		int failedHeight = -1;
 		/** Smooths node transforms across the 20 tps channel; see NodeInterpolator. */
 		final NodeInterpolator interp = new NodeInterpolator();
+		/** Last mirror epoch this cache saw; a change means a new timeline, so snap. */
+		int knownEpoch;
 		final Map<Integer, TexEntry> textures = new HashMap<Integer, TexEntry>();
 	}
 
@@ -331,8 +333,15 @@ public final class SceneRenderer {
 		// Fold a freshly applied batch into the interpolator BEFORE deciding whether to draw:
 		// capture() is what starts a node moving, so skipping it would drop the motion
 		// entirely on the frame the batch lands.
+		if (gl.knownEpoch != mirror.knownEpoch()) {
+			// A new incarnation is a different timeline: tick stamps from the old one describe
+			// nothing in the new one, so the clock estimate and every keyframe must be dropped
+			// rather than interpolated across. DESIGN: "Resync always snaps."
+			gl.knownEpoch = mirror.knownEpoch();
+			gl.interp.reset();
+		}
 		if (mirror.isDirty()) {
-			gl.interp.capture(mirror.state(), now, mirror.teleportedNodes());
+			gl.interp.capture(mirror.state(), mirror.lastServerTick(), now, mirror.teleportedNodes());
 		}
 		// Re-render while anything is still mid-flight, not only when a batch arrived — that
 		// is the whole point, since batches land at 20 Hz and we draw at 60+. A settled scene
