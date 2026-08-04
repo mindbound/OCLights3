@@ -101,12 +101,23 @@ public final class V2ServerRuntime {
 	}
 
 	/** Registered by the owning TE once its scene + host exist (first server tick). */
-	public void register(TileEntityGpu2 te) {
+	/**
+	 * Synchronized because the debug overlay reads this map from the CLIENT RENDER THREAD in
+	 * single-player, while chunk load/unload writes it from the server thread.
+	 *
+	 * The readers were synchronized first and the writers were not, which made the locking
+	 * vacuous: a monitor only excludes other holders of it. The render thread could then
+	 * iterate a LinkedHashMap mid-structural-modification, and a ConcurrentModificationException
+	 * there is not a wrong number — FML's EventBus re-propagates it out of the overlay dispatch
+	 * and the client dies to a crash report. Both call sites are outside sceneLock, so taking
+	 * this monitor here introduces no lock-order inversion.
+	 */
+	public synchronized void register(TileEntityGpu2 te) {
 		hostsByScene.put(te.sceneId(), te);
 	}
 
 	/** Unregistered on TE invalidate/chunk-unload; the scene lives on in NBT. */
-	public void unregister(TileEntityGpu2 te) {
+	public synchronized void unregister(TileEntityGpu2 te) {
 		TileEntityGpu2 current = hostsByScene.get(te.sceneId());
 		if (current == te) {
 			hostsByScene.remove(te.sceneId());
@@ -116,6 +127,24 @@ public final class V2ServerRuntime {
 	/** The GPU driving a scene, or null when its chunk is not loaded. */
 	public TileEntityGpu2 gpuForScene(String sceneId) {
 		return hostsByScene.get(sceneId);
+	}
+
+	/**
+	 * Scene ids with a live host, for the debug overlay.
+	 *
+	 * A copy taken under the monitor that {@link #register}/{@link #unregister} also hold. Both
+	 * halves are load-bearing: the copy stops the caller retaining a live view, and the shared
+	 * monitor stops the copy itself racing a structural modification. Copying alone would not
+	 * help, which is what the first version of this comment wrongly claimed.
+	 */
+	public synchronized java.util.List<String> sceneIds() {
+		return new ArrayList<String>(hostsByScene.keySet());
+	}
+
+	/** Wire counters for one scene, or null if it has no host or no sync layer yet. */
+	public synchronized opengpu.v2.stats.SceneStats statsFor(String sceneId) {
+		TileEntityGpu2 te = hostsByScene.get(sceneId);
+		return te == null ? null : te.sceneStats();
 	}
 
 	/** True if a live TE currently drives this scene id (guards blind store deletes). */

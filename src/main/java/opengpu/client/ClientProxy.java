@@ -8,6 +8,14 @@ public class ClientProxy extends CommonProxy {
 	@Override
 	public void initV2Client() {
 		opengpu.v2.mc.client.V2ClientRuntime.init();
+
+		// Debug overlay for the render counters. Unbound by default (key code 0): it is a
+		// developer tool, and claiming a key on every player's keyboard to show frame timings
+		// would be rude. Bind it in Controls under "OpenGPU" when measuring.
+		net.minecraft.client.settings.KeyBinding toggle =
+				new net.minecraft.client.settings.KeyBinding("key.opengpu.stats", 0, "key.categories.opengpu");
+		cpw.mods.fml.client.registry.ClientRegistry.registerKeyBinding(toggle);
+		opengpu.v2.mc.client.StatsOverlay.init(toggle);
 	}
 
 	/**

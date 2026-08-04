@@ -149,6 +149,10 @@ public final class SceneHost {
 		if (batch != null) {
 			if (!watchers.isEmpty()) {
 				byte[] envelope = MessageCodec.envelope(MessageCodec.MSG_BATCH, BatchCodec.encode(batch));
+				// A save-boundary seal is a real batch on the real wire, so it counts. Leaving it
+				// out made saves invisible to the measurement while still costing bandwidth --
+				// and a save is exactly when a scene's largest batch tends to go out.
+				stats.onBatch(envelope.length, batch.deltas.size(), watchers.size());
 				for (String watcher : watchers) {
 					transport.sendToWatcher(watcher, envelope);
 				}
@@ -157,16 +161,38 @@ public final class SceneHost {
 		}
 	}
 
+	/**
+	 * Wire-cost counters for this scene. Plain longs mutated under the scene lock the callers
+	 * already hold; see SceneStats for why nothing here is timed or buffered.
+	 */
+	private final opengpu.v2.stats.SceneStats stats = new opengpu.v2.stats.SceneStats();
+
+	public opengpu.v2.stats.SceneStats stats() {
+		return stats;
+	}
+
 	/** Called once per server tick, after the component layer's mutations, under the scene lock. */
 	public void tick(long currentTick) {
 		lastTick = currentTick;
 		if (destroyed)
 			return;
 		scene.setCurrentTick(currentTick);
+		// Counted here, unconditionally and before the branches below, because the branches do
+		// NOT cover every tick: sealing a batch with no watchers sends nothing, and a heartbeat
+		// tick is neither a batch nor idle. Deriving the divisor from those outcomes dropped
+		// both cases and inflated every per-tick figure.
+		stats.onTick();
 		SceneBatch batch = scene.sealBatch();
 		if (batch != null) {
 			if (!watchers.isEmpty()) {
-				byte[] envelope = MessageCodec.envelope(MessageCodec.MSG_BATCH, BatchCodec.encode(batch));
+				byte[] payload = BatchCodec.encode(batch);
+				byte[] envelope = MessageCodec.envelope(MessageCodec.MSG_BATCH, payload);
+				// Measured on the ENVELOPE, not the payload: the envelope is what the transport
+				// hands to the network, and the header is not free. Watcher count is passed
+				// along because one encoding is sent to each of them -- the server pays for it
+				// once and the network pays per watcher, and only recording the former would
+				// understate a populated server by exactly that factor.
+				stats.onBatch(envelope.length, batch.deltas.size(), watchers.size());
 				for (String watcher : watchers) {
 					transport.sendToWatcher(watcher, envelope);
 				}
@@ -174,14 +200,20 @@ public final class SceneHost {
 			idleTicks = 0;
 		} else if (!watchers.isEmpty() && ++idleTicks >= heartbeatInterval) {
 			byte[] envelope = heartbeatEnvelope();
+			stats.onHeartbeat(watchers.size());
 			for (String watcher : watchers) {
 				transport.sendToWatcher(watcher, envelope);
 			}
 			idleTicks = 0;
+		} else {
+			// A tick that produced nothing. Counted because it is the divisor that turns batch
+			// size into bytes-per-tick, and those two figures argue for opposite cap changes.
+			stats.onIdleTick();
 		}
 		// Snapshots only exist at batch boundaries — serve queued requests now.
 		if (!pendingSnapshotRequests.isEmpty()) {
 			byte[] envelope = snapshotEnvelope();
+			stats.onSnapshot(envelope.length, pendingSnapshotRequests.size());
 			for (String watcher : pendingSnapshotRequests) {
 				if (watchers.contains(watcher)) {
 					lastSnapshotServe.put(watcher, currentTick);
@@ -265,6 +297,7 @@ public final class SceneHost {
 				if (envelope == null)
 					continue;
 				stampBodyServe(watcher, resId, currentTick);
+				stats.onBodyServed(envelope.length);
 				transport.sendToWatcher(watcher, envelope);
 				served++;
 			}

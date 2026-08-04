@@ -19,6 +19,7 @@ import opengpu.OpenGPU;
 import opengpu.v2.protocol.V2Wire;
 import opengpu.v2.scene.ResourceInfo;
 import opengpu.v2.scene.SceneMirror;
+import opengpu.v2.stats.RenderStats;
 import opengpu.v2.sync.MirrorClient;
 
 /**
@@ -146,6 +147,7 @@ public final class SceneRenderer {
 		}
 		pruneDeadScenes(mirrors);
 		long budget = UPLOAD_BUDGET_PER_FRAME;
+		long rendersBefore = RenderStats.sceneRenders;
 		for (String sceneId : usedScenes) {
 			if (!mirrors.hasMirror(sceneId)) {
 				continue;
@@ -159,6 +161,10 @@ public final class SceneRenderer {
 			budget = uploadTextures(gl, mirror, budget);
 			renderIfNeeded(gl, mirror);
 		}
+		// "Did this frame have to draw anything" is the interpolation overhead stated directly,
+		// and it is measured HERE rather than inside renderIfNeeded because several scenes may
+		// be visible and the question is about the frame, not about any one of them.
+		RenderStats.onPrePass(RenderStats.sceneRenders > rendersBefore);
 	}
 
 	private void pruneDeadScenes(MirrorClient mirrors) {
@@ -226,9 +232,14 @@ public final class SceneRenderer {
 			// frame), leaving a legally-created texture permanently invisible. Admitting it
 			// against an untouched budget costs one hitchy frame instead.
 			if (size > budget && budget < UPLOAD_BUDGET_PER_FRAME) {
+				// Counted because a budget that is regularly exhausted means textures are
+				// arriving faster than they can be uploaded, which shows up to a player as a
+				// picture that lags behind the program rather than as anything measurable.
+				RenderStats.onTextureDeferred();
 				continue; // over budget this frame; a later pre-pass picks it up
 			}
 			budget -= size;
+			RenderStats.onUpload((int) Math.min(size, Integer.MAX_VALUE));
 			if (canSubUpload) {
 				uploadSubRgba(entry.glId, res.width, res.bytes,
 						res.dirtyX, res.dirtyY, res.dirtyW, res.dirtyH);
@@ -354,15 +365,42 @@ public final class SceneRenderer {
 		for (Map.Entry<Integer, TexEntry> entry : gl.textures.entrySet()) {
 			glMap.put(entry.getKey(), entry.getValue().glId);
 		}
+		// The render is attributed to interpolation when nothing else asked for it. That is the
+		// number the whole measurement exists for: a re-render caused by fresh server state is
+		// work that always had to happen, while one caused purely by a node still gliding is
+		// the cost interpolation added — and at 60-200 Hz against a former ceiling of 20.
+		boolean interpolationDriven = interpolating && !mirror.isDirty() && !gl.uploadDirty
+				&& gl.everRendered;
+		int commandCount = countCommands(mirror);
+		long renderStart = System.nanoTime();
 		pass.begin(gl.fbo, gl.width, gl.height);
 		try {
 			canvasRenderer.renderScene(mirror.state(), gl.width, gl.height, glMap, gl.interp, now);
 		} finally {
 			pass.end();
 		}
+		RenderStats.onSceneRender(System.nanoTime() - renderStart, commandCount, interpolationDriven);
 		gl.everRendered = true;
 		gl.uploadDirty = false;
 		mirror.clearDirty();
+	}
+
+	/**
+	 * Commands about to be replayed, summed across every canvas in the scene.
+	 *
+	 * Counted rather than timed per command: the unit of work here is a glBegin/glEnd pair, so
+	 * a nanoTime around each one would cost more than the thing it measures. Dividing the whole
+	 * render by this count gives the per-command figure without perturbing it. The walk is over
+	 * canvases, not commands, so it stays cheap.
+	 */
+	private static int countCommands(SceneMirror mirror) {
+		int total = 0;
+		for (ResourceInfo res : mirror.state().resources.values()) {
+			if (res.type == V2Wire.RES_CANVAS && res.canvas != null) {
+				total += res.canvas.visibleCommands().size();
+			}
+		}
+		return total;
 	}
 
 	/**

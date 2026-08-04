@@ -1,3 +1,5 @@
 tile.gpu2.name=GPU (v2)
 tile.screen2.name=Screen (v2)
 itemGroup.OpenGPU=OpenGPU
+key.categories.opengpu=OpenGPU
+key.opengpu.stats=Toggle render stats overlay

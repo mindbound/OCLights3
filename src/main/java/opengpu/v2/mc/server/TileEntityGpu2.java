@@ -803,6 +803,18 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 	// ------------------------------------------------------------------
 	// OC Environment
 
+	/**
+	 * Wire counters for this GPU's scene, or null before the sync layer exists.
+	 *
+	 * Read without the scene lock on purpose: the only caller is the debug overlay, and the
+	 * fields behind it are plain longs. Taking sceneLock from the render thread to draw a
+	 * number would be a far worse trade than showing one that is half a second stale.
+	 */
+	public opengpu.v2.stats.SceneStats sceneStats() {
+		SceneHost h = host;
+		return h == null ? null : h.stats();
+	}
+
 	@Override
 	public Node node() {
 		return node;
@@ -1654,6 +1666,74 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 			requireScene();
 			return new Object[] { scene.submitBudgetRemaining() };
 		}
+	}
+
+	/**
+	 * This scene's wire counters, as a Lua table.
+	 *
+	 * The measurement splits across two processes: render cost is a client quantity and shows
+	 * in the debug overlay, while everything here is produced on the server and is the only
+	 * half a program — or a dedicated server — can reach. A program can therefore measure its
+	 * own network cost, which is the figure the transport caps should be argued from.
+	 *
+	 * Read the two averages carefully, because they answer different questions and one of them
+	 * is almost always the wrong one: {@code bytesPerBatch} is how big a frame is, while
+	 * {@code bytesPerTick} divides by idle ticks too. A program updating once a second has a
+	 * large former and a tiny latter, and only the latter says anything about sustained load.
+	 */
+	@Callback(direct = true, doc = "function():table -- Wire counters for this scene: batches, deltas, bytes, bytesPerTick, bytesPerBatch, maxBatchBytes, bytesSent, idleTicks, heartbeats, snapshots, snapshotBytes, bodies, bodyBytes, maxWatchers. Client-side render cost is not here; it lives in the debug overlay.")
+	public Object[] getStats(Context context, Arguments args) throws Exception {
+		java.util.Map<String, Object> out = new java.util.LinkedHashMap<String, Object>();
+		// Read every field INSIDE the lock. Reading them after releasing it would let a tick
+		// land mid-table and produce a set of numbers that never described one moment -- a
+		// batch counted in `batches` but its bytes missing from `bytes`, say. Nobody could tell
+		// from the result, which is exactly why it matters for an instrument.
+		synchronized (sceneLock) {
+			requireScene();
+			opengpu.v2.stats.SceneStats s = sceneStats();
+			if (s == null) {
+				throw new Exception("this GPU has no sync layer yet; place it and let it tick once");
+			}
+			out.put("ticks", Long.valueOf(s.ticks));
+			out.put("batches", Long.valueOf(s.batches));
+			out.put("idleTicks", Long.valueOf(s.idleTicks));
+			out.put("deltas", Long.valueOf(s.deltas));
+			out.put("bytes", Long.valueOf(s.batchBytes));
+			out.put("bytesSent", Long.valueOf(s.batchBytesSent));
+			out.put("maxBatchBytes", Long.valueOf(s.batchBytesMax));
+			out.put("bytesPerBatch", Double.valueOf(s.meanBatchBytes()));
+			out.put("bytesPerTick", Double.valueOf(s.meanBytesPerTick()));
+			out.put("heartbeats", Long.valueOf(s.heartbeats));
+			out.put("snapshots", Long.valueOf(s.snapshots));
+			out.put("snapshotBytes", Long.valueOf(s.snapshotBytes));
+			out.put("maxSnapshotBytes", Long.valueOf(s.snapshotBytesMax));
+			out.put("bodies", Long.valueOf(s.bodies));
+			out.put("bodyBytes", Long.valueOf(s.bodyBytes));
+			out.put("maxWatchers", Integer.valueOf(s.watchersMax));
+		}
+		return new Object[] { out };
+	}
+
+	/**
+	 * Zero the counters, so a program can measure one window rather than everything since load.
+	 *
+	 * Deliberately available to Lua: without it the only way to bound a measurement is to
+	 * restart the server, and a figure that includes world load is not a figure about the
+	 * program that read it.
+	 */
+	@Callback(direct = true, doc = "function() -- Zero this scene's wire counters, to measure a window.")
+	public Object[] resetStats(Context context, Arguments args) throws Exception {
+		// Under sceneLock, matching getStats. This runs on an OC machine thread while the
+		// server tick thread is incrementing the same fields; zeroing them unsynchronized could
+		// interleave with an onBatch and leave bytes counted against a batch total that was
+		// reset out from under them.
+		synchronized (sceneLock) {
+			opengpu.v2.stats.SceneStats s = sceneStats();
+			if (s != null) {
+				s.reset();
+			}
+		}
+		return null;
 	}
 
 	@Callback(direct = true, limit = 8, doc = "function(width:number, height:number[, commandCap:number]):number -- Allocate an offscreen canvas; returns its resource id. Draw into it, or use it as a drawTexture/sprite source.")
