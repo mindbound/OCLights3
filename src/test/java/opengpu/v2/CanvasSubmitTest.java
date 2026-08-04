@@ -275,14 +275,14 @@ public class CanvasSubmitTest {
 		int canvas = server.createCanvas(64, 64, CAP);
 		server.createNode(V2Wire.NODE_CANVAS, canvas);
 
-		assertEquals(V2Wire.MAX_SUBMIT_BYTES, server.submitBudgetRemaining());
+		assertEquals(V2Wire.MAX_SUBMIT_BYTES_PER_TICK, server.submitBudgetRemaining());
 
 		byte[] payload = sampleRect();
 		List<CanvasCommand> cmds = BatchCodec.decodeCommandList(payload);
 		int spent = 0;
-		while (server.submitCanvas(canvas, cmds, false, V2Wire.MAX_SUBMIT_BYTES / 4)) {
-			spent += V2Wire.MAX_SUBMIT_BYTES / 4;
-			assertTrue("the allowance must be finite", spent <= V2Wire.MAX_SUBMIT_BYTES);
+		while (server.submitCanvas(canvas, cmds, false, V2Wire.MAX_SUBMIT_BYTES_PER_TICK / 4)) {
+			spent += V2Wire.MAX_SUBMIT_BYTES_PER_TICK / 4;
+			assertTrue("the allowance must be finite", spent <= V2Wire.MAX_SUBMIT_BYTES_PER_TICK);
 		}
 		assertEquals("a spent tick must report nothing left", 0, server.submitBudgetRemaining());
 		assertFalse("a refused submit must stay refused within the tick",
@@ -293,8 +293,80 @@ public class CanvasSubmitTest {
 		server.sealBatch();
 		server.setCurrentTick(2);
 		assertEquals("the next tick must start clean",
-				V2Wire.MAX_SUBMIT_BYTES, server.submitBudgetRemaining());
+				V2Wire.MAX_SUBMIT_BYTES_PER_TICK, server.submitBudgetRemaining());
 		assertTrue(server.submitCanvas(canvas, cmds, false, payload.length));
+	}
+
+	@Test
+	public void aTickBoundaryWithoutASealMustStillRefreshTheAllowance() throws Exception {
+		// THE regression test for the defect confirmed in-game on 2026-08-04. The test above
+		// seals and THEN advances the tick, which is the one interleaving that always worked.
+		// Production does the opposite: OC callbacks are direct, so they run on a machine
+		// executor thread and land wherever they like relative to the server thread — including
+		// the window between the END-phase seal and the next START-phase grant. A submit there
+		// is charged to tick T's allowance but staged into the batch that seals at the END of
+		// T+1, so at T+1 the tick counter has reset and the staged counter has not.
+		//
+		// With both bounds set to MAX_SUBMIT_BYTES that left ZERO budget at the replay, which is
+		// exactly what made canvasSubmit's consumeCallBudget retry unable to clear: Lua saw a
+		// false it could not fix by waiting, abandoned the remaining chunk, and left the canvas
+		// showing a torn frame. The batch bound has to be strictly larger than the tick bound or
+		// this check is tighter than the one it sits behind.
+		ServerScene server = freshScene();
+		int canvas = server.createCanvas(64, 64, CAP);
+		server.createNode(V2Wire.NODE_CANVAS, canvas);
+		List<CanvasCommand> cmds = BatchCodec.decodeCommandList(sampleRect());
+
+		assertTrue("a full tick allowance must be admissible in one go",
+				server.submitCanvas(canvas, cmds, false, V2Wire.MAX_SUBMIT_BYTES_PER_TICK));
+		assertEquals("the tick is now spent", 0, server.submitBudgetRemaining());
+
+		// The tick advances. NO seal — that is the whole point.
+		server.setCurrentTick(2);
+
+		assertTrue("a tick boundary without a seal must hand back a usable allowance, or the "
+				+ "transparent next-tick retry can never clear", server.submitBudgetRemaining() > 0);
+		assertEquals("and specifically a whole tick's worth, bounded by what the batch has left",
+				V2Wire.MAX_SUBMIT_BYTES_PER_TICK, server.submitBudgetRemaining());
+		assertTrue("so the replayed call must now be admitted",
+				server.submitCanvas(canvas, cmds, false, V2Wire.MAX_SUBMIT_BYTES_PER_TICK));
+
+		// Both ticks' payload is in ONE unsealed batch, which is precisely why the batch bound
+		// must cover two tick allowances rather than one.
+		assertEquals("the batch is now full and must refuse", 0, server.submitBudgetRemaining());
+		assertFalse(server.submitCanvas(canvas, cmds, false, 1));
+	}
+
+	@Test
+	public void aTwoChunkFrameLandsWholeInOneTickAndOneBatch() throws Exception {
+		// The user-visible half of the same fix. The Lua library chunks a frame at the per-CALL
+		// ceiling, so a frame over ~64 KiB arrives as two submits: a publish then an append. When
+		// the per-tick allowance WAS the per-call ceiling, chunk 1 consumed all of it and chunk 2
+		// was refused unconditionally — for any op mix, with no contention. The measured case was
+		// a 99,037-byte frame chunking to 65,509 + 33,532.
+		//
+		// Landing both in one tick is what makes the frame atomic to viewers: SceneMirror
+		// .applyBatch applies every delta before setting dirty once, so a frame carried by a
+		// single batch is never rendered half-drawn.
+		ServerScene server = freshScene();
+		int canvas = server.createCanvas(64, 64, CAP);
+		server.createNode(V2Wire.NODE_CANVAS, canvas);
+		// Clear the setup's own resource/node deltas so the assertion below counts the frame.
+		server.sealBatch();
+		List<CanvasCommand> cmds = BatchCodec.decodeCommandList(sampleRect());
+
+		int chunkOne = V2Wire.MAX_SUBMIT_BYTES - 27;   // the chunker packs to the ceiling
+		int chunkTwo = 33532;
+		assertTrue("chunk 1 is a legal single call", chunkOne <= V2Wire.MAX_SUBMIT_BYTES);
+		assertTrue("and so is chunk 2", chunkTwo <= V2Wire.MAX_SUBMIT_BYTES);
+
+		assertTrue(server.submitCanvas(canvas, cmds, true, chunkOne));
+		assertTrue("the continuation must fit the SAME tick, or the frame tears",
+				server.submitCanvas(canvas, cmds, false, chunkTwo));
+
+		SceneBatch batch = server.sealBatch();
+		assertNotNull("both chunks must seal together", batch);
+		assertEquals("one batch carries the whole frame", 2, batch.deltas.size());
 	}
 
 	@Test
@@ -307,10 +379,10 @@ public class CanvasSubmitTest {
 		byte[] payload = sampleRect();
 		List<CanvasCommand> cmds = BatchCodec.decodeCommandList(payload);
 
-		assertFalse(server.submitCanvas(canvas, cmds, false, V2Wire.MAX_SUBMIT_BYTES + 1));
+		assertFalse(server.submitCanvas(canvas, cmds, false, V2Wire.MAX_SUBMIT_BYTES_PER_TICK + 1));
 		assertEquals(0, server.state().resources.get(canvas).canvas.visibleCommands().size());
 		assertEquals("a refused submit must not spend the allowance",
-				V2Wire.MAX_SUBMIT_BYTES, server.submitBudgetRemaining());
+				V2Wire.MAX_SUBMIT_BYTES_PER_TICK, server.submitBudgetRemaining());
 	}
 
 	@Test
@@ -333,7 +405,7 @@ public class CanvasSubmitTest {
 			assertTrue(expected.getMessage().toLowerCase().contains("full"));
 		}
 		assertEquals(0, server.state().resources.get(canvas).canvas.visibleCommands().size());
-		assertEquals(V2Wire.MAX_SUBMIT_BYTES, server.submitBudgetRemaining());
+		assertEquals(V2Wire.MAX_SUBMIT_BYTES_PER_TICK, server.submitBudgetRemaining());
 	}
 
 	@Test

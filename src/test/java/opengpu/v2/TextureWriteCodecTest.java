@@ -134,14 +134,30 @@ public class TextureWriteCodecTest {
 	}
 
 	@Test
-	public void aggregatePerTickCapIsEnforcedAcrossDeltasInOneBatch() throws Exception {
-		// Each write is legal alone (64x32 = 8192 bytes), but three of them exceed the
-		// per-tick aggregate — a producer cannot emit this, so the decoder must refuse it.
-		Delta.TextureWrite a = new Delta.TextureWrite(1, 1, 0, 0, 64, 32, new byte[64 * 32 * 4]);
-		Delta.TextureWrite b = new Delta.TextureWrite(1, 2, 0, 0, 64, 32, new byte[64 * 32 * 4]);
-		Delta.TextureWrite c = new Delta.TextureWrite(1, 3, 0, 0, 64, 32, new byte[64 * 32 * 4]);
-		// Two fit exactly at the cap.
-		BatchCodec.decode(BatchCodec.encode(batchOf(a, b)));
-		expectReject(BatchCodec.encode(batchOf(a, b, c)), "aggregate over the per-tick cap");
+	public void aggregatePerBatchCapIsEnforcedAcrossDeltasInOneBatch() throws Exception {
+		// Each write is legal alone (64x32 = 8192 bytes); the aggregate across one batch is not.
+		// The bound is the per-BATCH constant, deliberately larger than the per-tick one: a batch
+		// accumulates from one seal to the next while the tick allowance resets at tick change,
+		// so a batch legitimately carries up to two ticks' admitted payload. Bounding the decoder
+		// by the per-tick number would reject traffic the producer can legally emit, losing the
+		// whole batch at every receiver.
+		//
+		// Derived from the constant rather than hardcoded, so moving the constant moves the test
+		// with it instead of silently pinning a stale threshold — which is exactly how the old
+		// value survived unexamined.
+		final int perWrite = 64 * 32 * 4;
+		final int fits = V2Wire.MAX_WRITE_BYTES_PER_BATCH / perWrite;
+
+		Delta[] atCap = new Delta[fits];
+		for (int i = 0; i < fits; i++) {
+			atCap[i] = new Delta.TextureWrite(1, i + 1, 0, 0, 64, 32, new byte[perWrite]);
+		}
+		BatchCodec.decode(BatchCodec.encode(batchOf(atCap)));
+
+		Delta[] overCap = new Delta[fits + 1];
+		for (int i = 0; i < overCap.length; i++) {
+			overCap[i] = new Delta.TextureWrite(1, i + 1, 0, 0, 64, 32, new byte[perWrite]);
+		}
+		expectReject(BatchCodec.encode(batchOf(overCap)), "aggregate over the per-batch cap");
 	}
 }

@@ -113,9 +113,10 @@ public class TextureStreamingTest {
 			fail("expected the per-tick allowance to be exhausted");
 		} catch (IllegalStateException expected) {
 		}
-		// A new tick grants a fresh allowance — but only once the batch has been sealed, as
-		// the real tick loop does. Capacity is the tighter of the two bounds, so an unsealed
-		// batch still holds the line (see aBatchSpanningTickBoundariesStaysWithinTheDecoderCap).
+		// A new tick grants a fresh allowance. Capacity is the tighter of the two bounds, but the
+		// batch bound is deliberately the looser one — an unsealed batch holds two tick
+		// allowances, not one, so the fresh grant is usable with or without this seal. See
+		// aBatchSpanningTickBoundariesStaysWithinTheDecoderCap for the unsealed path.
 		rig.server.sealBatch();
 		rig.server.beginTick(3, V2Wire.MAX_WRITE_BYTES_PER_TICK);
 		assertEquals(V2Wire.MAX_WRITE_BYTES_PER_TICK, rig.server.writeBudgetRemaining());
@@ -214,19 +215,39 @@ public class TextureStreamingTest {
 	@Test
 	public void aBatchSpanningTickBoundariesStaysWithinTheDecoderCap() throws Exception {
 		Rig rig = new Rig();
-		// Two full tick allowances spent with no seal in between.
+		// A batch spans up to TWO tick allowances, so both must be admissible into one unsealed
+		// batch. This used to fail on the second tick, because the batch was bounded by the
+		// per-TICK constant — a bound tighter than the tick check it sits behind, which is a
+		// refusal no caller can clear by waiting. The same shape on the canvas-submit path is
+		// what made a frame over 64 KiB undeliverable; see PERF-BASELINE.md.
 		rig.server.beginTick(2, V2Wire.MAX_WRITE_BYTES_PER_TICK);
 		for (int i = 0; i < 16; i++) {
 			rig.server.writeRegion(rig.texture, 0, 0, 16, 16, new byte[16 * 16 * 4]);
 		}
+		assertEquals("tick 2 is spent", 0, rig.server.writeBudgetRemaining());
+
+		// The tick advances with NO seal — the production ordering, since a direct callback runs
+		// off the server thread and can land between the END-phase seal and the START-phase grant.
 		rig.server.beginTick(3, V2Wire.MAX_WRITE_BYTES_PER_TICK);
+		assertEquals("a fresh tick must hand back a usable allowance even unsealed",
+				V2Wire.MAX_WRITE_BYTES_PER_TICK, rig.server.writeBudgetRemaining());
+		for (int i = 0; i < 16; i++) {
+			rig.server.writeRegion(rig.texture, 0, 0, 16, 16, new byte[16 * 16 * 4]);
+		}
+
+		// But the batch bound is real and still holds at its own, larger, limit.
+		rig.server.beginTick(4, V2Wire.MAX_WRITE_BYTES_PER_TICK);
+		assertEquals("a third tick is bounded by the batch, not by the tick",
+				0, rig.server.writeBudgetRemaining());
 		try {
 			rig.server.writeRegion(rig.texture, 0, 0, 16, 16, new byte[16 * 16 * 4]);
-			fail("the batch bound must hold even with a fresh tick allowance");
+			fail("the batch bound must hold once two tick allowances are staged");
 		} catch (IllegalStateException expected) {
 		}
+
 		// Whatever was admitted must still decode: the producer can never build a batch the
-		// receiver refuses.
+		// receiver refuses. This is the check that keeps the producer and decoder constants
+		// moving together — MAX_WRITE_BYTES_PER_BATCH is enforced at both ends.
 		SceneBatch batch = rig.server.sealBatch();
 		BatchCodec.decode(BatchCodec.encode(batch));
 		// After the seal the batch bound is clear again, and the tick allowance still governs.

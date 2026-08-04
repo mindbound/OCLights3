@@ -55,25 +55,90 @@ public final class V2Wire {
 	/** One writeRegion payload: 64x64 RGBA. Producer cap AND decoder cap. */
 	public static final int MAX_WRITE_REGION_BYTES = 16384;
 	/**
-	 * Aggregate texture-write payload admitted per scene per tick. Equal to the per-call cap
+	 * Aggregate texture-write payload admitted per scene per TICK. Equal to the per-call cap
 	 * deliberately: one full-size write per tick is expressible and is the documented
-	 * contract. Enforced at admission, at seal, and at decode. Raising this is gated on batch
-	 * compression landing — every number here is a function of whether that exists.
+	 * contract. Raising this is gated on batch compression landing — every number here is a
+	 * function of whether that exists.
 	 */
 	public static final int MAX_WRITE_BYTES_PER_TICK = 16384;
 
 	/**
-	 * Packed command bytes one canvasSubmit may carry, and the allowance per scene per tick.
+	 * Texture-write payload one BATCH may carry. Twice the per-tick allowance, and the factor
+	 * of two is structural rather than a safety margin.
+	 *
+	 * A batch can legitimately carry TWO ticks' worth of admitted payload. OC callbacks are
+	 * {@code direct=true}, so they run on a machine executor thread, not the server thread — a
+	 * write admitted in the window between the END-phase seal and the next START-phase grant is
+	 * charged to tick T's allowance but staged into the batch that seals at the END of T+1.
+	 * {@code stagedWriteBytes} resets at seal; {@code tickWriteBytes} resets at the tick change;
+	 * they are deliberately different counters and the batch one therefore spans strictly more.
+	 *
+	 * Bounding a batch by ONE tick's number is short by construction, and the failure is not a
+	 * throttle but a refusal the caller cannot clear by waiting: the retry lands in the same
+	 * unsealed batch and is refused identically. The identical mistake on the submit path is
+	 * what made a frame over 64 KiB undeliverable — see MAX_SUBMIT_BYTES_PER_BATCH.
+	 *
+	 * MUST move together with the decoder check in BatchCodec, which bounds a decoded batch by
+	 * this same quantity. A producer admitting more than the decoder accepts loses the whole
+	 * batch at every receiver rather than throttling anyone.
+	 */
+	public static final int MAX_WRITE_BYTES_PER_BATCH = 2 * MAX_WRITE_BYTES_PER_TICK;
+
+	/**
+	 * Packed command bytes ONE canvasSubmit call may carry. A per-CALL ceiling and nothing else.
 	 *
 	 * Its own bound, NOT the texture-write budget: these pace different things (command lists
 	 * versus pixel payloads) and reusing a neighbouring concept's number is how this codebase
 	 * has repeatedly produced bounds that were wrong for what they were bounding.
 	 *
-	 * Well under MAX_INFLATED_BYTES on purpose. Admission has to keep a tick's batch inside
-	 * what the DECODER will accept — a batch that overruns the decoder is rejected wholesale,
-	 * which loses the whole frame rather than throttling the caller.
+	 * It bounds one {@code checkByteArray} copy and one {@code decodeCommandList} allocation.
+	 * It is also bracketed from below by the widest single command — an OP_DRAW_TEXT at
+	 * MAX_TEXT_CHARS is ~24.6 KB, so the ceiling must clear several times that to be usable —
+	 * and from above by the caller's own memory: the payload is a Lua string built with
+	 * table.concat, needing the parts table and the result live at once, against 192 KiB of
+	 * Lua RAM on a tier-1 machine.
+	 *
+	 * This constant used to serve as the per-tick and per-batch allowance as well. That is what
+	 * made any frame larger than one submit undeliverable: the library chunks at this ceiling,
+	 * so chunk 1 consumed the entire tick AND batch allowance and left less than one command's
+	 * worth for chunk 2 — provably, for any op mix, with no contention. See PERF-BASELINE.md.
 	 */
 	public static final int MAX_SUBMIT_BYTES = 65536;
+
+	/**
+	 * Packed command bytes admitted per scene per TICK. The rate limiter.
+	 *
+	 * Sized to the MEASURED case rather than the theoretical maximum: the largest frame anyone
+	 * has actually published is ~99 KB (3001 commands, PERF-BASELINE.md), which chunks to two
+	 * submits. Two ceilings admits that in a single tick, so it lands in ONE batch — and
+	 * SceneMirror.applyBatch applies a whole batch before setting {@code dirty}, so a frame that
+	 * lands in one batch is never rendered half-drawn.
+	 *
+	 * Deliberately NOT sized to a full 4096-command canvas (~233 KB, four chunks). That frame
+	 * still completes, over two ticks, via the admission retry the batch bound now makes work;
+	 * it may show torn for one tick, which is the seal race that server-side frame assembly
+	 * (DESIGN-RENDERER-V2 § scene.begin/commit) exists to close properly. Buying tear-freedom
+	 * for a frame size nobody has published, by doubling the sustained bandwidth a single Lua
+	 * program can drive, is the trade this project keeps getting wrong in the generous
+	 * direction. Raise it when a measurement asks for it, which is cheap; lowering a shipped
+	 * allowance is not.
+	 *
+	 * At 20 ticks/s this permits 2.6 MB/s per watcher per scene pre-DEFLATE.
+	 */
+	public static final int MAX_SUBMIT_BYTES_PER_TICK = 2 * MAX_SUBMIT_BYTES;
+
+	/**
+	 * Packed command bytes one BATCH may carry. Twice the per-tick allowance, for exactly the
+	 * reason given on MAX_WRITE_BYTES_PER_BATCH: a batch spans up to two tick allowances because
+	 * direct callbacks run off the server thread and can land in the inter-tick window.
+	 *
+	 * This is the constant whose absence produced the confirmed defect. With the batch bounded
+	 * by one tick's worth, canvasSubmit's {@code consumeCallBudget} retry — which exists to make
+	 * a refusal transparent to Lua — could not clear: at the next tick's synchronized replay
+	 * {@code tickSubmitBytes} had reset at START but {@code stagedSubmitBytes} had not, because
+	 * it only resets at the END-phase seal, which had not run yet. Verified in-game 2026-08-04.
+	 */
+	public static final int MAX_SUBMIT_BYTES_PER_BATCH = 2 * MAX_SUBMIT_BYTES_PER_TICK;
 
 	/**
 	 * Encoded command bytes a scene may HOLD across all its canvases at once.

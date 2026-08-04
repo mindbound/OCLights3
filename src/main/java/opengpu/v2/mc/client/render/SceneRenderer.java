@@ -19,6 +19,8 @@ import opengpu.OpenGPU;
 import opengpu.v2.protocol.V2Wire;
 import opengpu.v2.scene.ResourceInfo;
 import opengpu.v2.scene.SceneMirror;
+import opengpu.v2.scene.SceneState;
+import opengpu.v2.scene.SceneNode;
 import opengpu.v2.stats.RenderStats;
 import opengpu.v2.sync.MirrorClient;
 
@@ -386,17 +388,31 @@ public final class SceneRenderer {
 	}
 
 	/**
-	 * Commands about to be replayed, summed across every canvas in the scene.
+	 * Commands about to be replayed — walked over NODES, mirroring what the renderer draws.
 	 *
-	 * Counted rather than timed per command: the unit of work here is a glBegin/glEnd pair, so
-	 * a nanoTime around each one would cost more than the thing it measures. Dividing the whole
-	 * render by this count gives the per-command figure without perturbing it. The walk is over
-	 * canvases, not commands, so it stays cheap.
+	 * Counted rather than timed per command: the unit of work is a glBegin/glEnd pair, so a
+	 * nanoTime around each would cost more than the thing it measures. Dividing the whole
+	 * render by this count gives the per-command figure without perturbing it.
+	 *
+	 * The first version summed every RES_CANVAS in the scene, which is NOT what gets replayed:
+	 * Canvas2dRenderer draws a canvas only when a VISIBLE canvas node references it, and
+	 * offscreen canvases outlive the nodes that showed them (clearNodes frees nodes, not
+	 * canvases). In practice that meant every canvas a previous program had allocated kept
+	 * contributing to the denominator. It showed up immediately in the first real measurement:
+	 * render-time divided by ns/command came out at a constant ~2400 commands across every
+	 * sample, for a scene whose one visible canvas held five — the rest was accumulated test
+	 * history. A denominator that does not move with the numerator makes the ratio meaningless,
+	 * which would have silently invalidated the command-count scaling experiment.
 	 */
 	private static int countCommands(SceneMirror mirror) {
+		SceneState state = mirror.state();
 		int total = 0;
-		for (ResourceInfo res : mirror.state().resources.values()) {
-			if (res.type == V2Wire.RES_CANVAS && res.canvas != null) {
+		for (SceneNode node : state.nodes.values()) {
+			if (!node.visible || node.type != V2Wire.NODE_CANVAS) {
+				continue;
+			}
+			ResourceInfo res = state.resources.get(node.ref);
+			if (res != null && res.type == V2Wire.RES_CANVAS && res.canvas != null) {
 				total += res.canvas.visibleCommands().size();
 			}
 		}

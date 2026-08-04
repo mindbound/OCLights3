@@ -324,8 +324,14 @@ public final class BatchCodec {
 				if (len > in.available())
 					throw new CodecException("Texture write payload exceeds remaining data");
 				writeBytes[0] += (int) len;
-				if (writeBytes[0] > V2Wire.MAX_WRITE_BYTES_PER_TICK)
-					throw new CodecException("Batch texture-write payload over the per-tick cap: "
+				// The BATCH bound, not the per-tick one. This accumulates across a whole decoded
+				// batch, and a batch spans up to two tick allowances — direct callbacks run off
+				// the server thread, so a write admitted between the END-phase seal and the next
+				// START-phase grant is charged to one tick and staged into the following batch.
+				// Checking a batch total against a per-tick number would reject legal traffic
+				// wholesale at every receiver, which costs the frame and forces a resync.
+				if (writeBytes[0] > V2Wire.MAX_WRITE_BYTES_PER_BATCH)
+					throw new CodecException("Batch texture-write payload over the per-batch cap: "
 							+ writeBytes[0]);
 				byte[] pixels = new byte[(int) len];
 				in.readFully(pixels);

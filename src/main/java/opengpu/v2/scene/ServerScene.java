@@ -222,7 +222,14 @@ public final class ServerScene {
 		// The batch bound is what the decoder checks, so it must hold independently of the
 		// tick allowance — a batch spanning a tick boundary would otherwise be rejected by
 		// every receiver, costing the whole frame and a resync.
-		if (stagedWriteBytes + len > V2Wire.MAX_WRITE_BYTES_PER_TICK)
+		//
+		// It gets its own constant at TWICE the tick allowance because that spanning is not an
+		// edge case, it is arithmetic: a batch accumulates from one END-phase seal to the next
+		// while the tick allowance resets at START, so a direct callback landing in the window
+		// between them is charged to one tick and staged into the following batch. Bounding the
+		// batch by one tick's number left this check tighter than the tick check it sits behind,
+		// which is a refusal no caller can clear by waiting.
+		if (stagedWriteBytes + len > V2Wire.MAX_WRITE_BYTES_PER_BATCH)
 			throw new IllegalStateException("Batch texture write payload exhausted");
 		tickWriteBytes += (int) len;
 		stagedWriteBytes += (int) len;
@@ -234,7 +241,7 @@ public final class ServerScene {
 		// The tighter of the two bounds: a caller pacing itself by this number must never be
 		// refused by the other one.
 		return Math.max(0, Math.min(writeBudgetBytes - tickWriteBytes,
-				V2Wire.MAX_WRITE_BYTES_PER_TICK - stagedWriteBytes));
+				V2Wire.MAX_WRITE_BYTES_PER_BATCH - stagedWriteBytes));
 	}
 
 	private static void validateDimensions(int width, int height) {
@@ -335,15 +342,26 @@ public final class ServerScene {
 	 * does that). One counter cannot bound both, and it is the BATCH bound that keeps a tick's
 	 * payload inside what the decoder will accept.
 	 *
+	 * The two bounds are now separately sized, and that is the fix for a confirmed defect rather
+	 * than a tidy-up. Both used to be MAX_SUBMIT_BYTES — the same constant the library chunks
+	 * at — so chunk 1 of any multi-chunk frame consumed the whole of both and chunk 2 could not
+	 * be admitted in that tick by any op mix, with no contention required. Worse, the batch
+	 * bound made it unrecoverable: canvasSubmit answers exhaustion with consumeCallBudget so OC
+	 * replays the call a tick later, but at that replay tickSubmitBytes has reset (START phase)
+	 * while stagedSubmitBytes has not (it resets at the END-phase seal, which has not run), so
+	 * the replay is refused identically and Lua sees a false it cannot clear by waiting.
+	 * MAX_SUBMIT_BYTES_PER_BATCH is twice the tick allowance because a batch genuinely spans up
+	 * to two of them. See PERF-BASELINE.md for the in-game confirmation.
+	 *
 	 * @return false when the allowance is exhausted — the caller decides whether to retry.
 	 */
 	public boolean submitCanvas(int resId, List<CanvasCommand> commands, boolean publish, int bytes) {
 		ResourceInfo res = state.resources.get(resId);
 		if (res == null || res.type != V2Wire.RES_CANVAS)
 			throw new IllegalStateException("Not a canvas: " + resId);
-		if (tickSubmitBytes + bytes > V2Wire.MAX_SUBMIT_BYTES)
+		if (tickSubmitBytes + bytes > V2Wire.MAX_SUBMIT_BYTES_PER_TICK)
 			return false;
-		if (stagedSubmitBytes + bytes > V2Wire.MAX_SUBMIT_BYTES)
+		if (stagedSubmitBytes + bytes > V2Wire.MAX_SUBMIT_BYTES_PER_BATCH)
 			return false;
 		// Charge AFTER the apply, not before: a list that overruns the canvas command cap throws
 		// out of DeltaApplier with nothing applied and nothing staged, and a call that changed
@@ -358,10 +376,16 @@ public final class ServerScene {
 		return true;
 	}
 
-	/** Bytes of canvas-submit payload still allowed this tick. */
+	/**
+	 * Bytes of canvas-submit payload still allowed this tick.
+	 *
+	 * The tighter of the two bounds, so a caller pacing itself by this number is never refused
+	 * by the other one. Note it can still be smaller than MAX_SUBMIT_BYTES: a caller must chunk
+	 * by the per-CALL ceiling and pace by this, and the two are different questions.
+	 */
 	public int submitBudgetRemaining() {
-		return Math.max(0, Math.min(V2Wire.MAX_SUBMIT_BYTES - tickSubmitBytes,
-				V2Wire.MAX_SUBMIT_BYTES - stagedSubmitBytes));
+		return Math.max(0, Math.min(V2Wire.MAX_SUBMIT_BYTES_PER_TICK - tickSubmitBytes,
+				V2Wire.MAX_SUBMIT_BYTES_PER_BATCH - stagedSubmitBytes));
 	}
 
 	/**

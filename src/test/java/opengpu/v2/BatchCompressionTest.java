@@ -177,15 +177,21 @@ public class BatchCompressionTest {
 	public void strictnessSurvivesCompression() throws Exception {
 		// A batch that is invalid at the inner layer must still be rejected after inflating:
 		// compression must not become a way to smuggle payloads past the caps.
+		//
+		// Sized off the constant rather than a hardcoded count. The threshold here is the
+		// per-BATCH write cap, which is deliberately larger than the per-tick one because a
+		// batch spans up to two tick allowances; pinning a literal count made this test pass for
+		// the wrong reason once the constants were told apart.
+		final int perWrite = 64 * 32 * 4;
+		final int overCap = V2Wire.MAX_WRITE_BYTES_PER_BATCH / perWrite + 1;
 		List<Delta> deltas = new ArrayList<Delta>();
-		Delta.TextureWrite w = new Delta.TextureWrite(1, 1, 0, 0, 64, 32, new byte[64 * 32 * 4]);
-		deltas.add(w);
-		deltas.add(new Delta.TextureWrite(1, 2, 0, 0, 64, 32, new byte[64 * 32 * 4]));
-		deltas.add(new Delta.TextureWrite(1, 3, 0, 0, 64, 32, new byte[64 * 32 * 4]));
+		for (int i = 0; i < overCap; i++) {
+			deltas.add(new Delta.TextureWrite(1, i + 1, 0, 0, 64, 32, new byte[perWrite]));
+		}
 		byte[] encoded = BatchCodec.encode(batchOf(deltas));
 		try {
 			BatchCodec.decode(encoded);
-			fail("the per-tick write cap must hold through the compressed path too");
+			fail("the per-batch write cap must hold through the compressed path too");
 		} catch (CodecException expected) {
 		}
 	}
