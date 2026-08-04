@@ -52,3 +52,23 @@ dependencies {
     runtimeOnly("com.github.GTNewHorizons:GTNHLib:0.11.24:dev")
     testImplementation("junit:junit:4.13.2")
 }
+
+// ---------------------------------------------------------------------------
+// Keep build/libs to the CURRENT build's artifacts only.
+//
+// Jar names embed the git description, so every commit leaves its jars behind and the directory
+// accumulates indefinitely — it had reached ~80 files. That is not merely untidy: the version
+// comes from a configuration-cached `GitTagVersionSource`, so a build can emit a jar named after
+// an OLDER commit than HEAD while the previous newest jar keeps a NEWER-looking name. Picking
+// "the latest jar" out of that directory by eye is how a stale jar ends up in a test instance,
+// which cost an evening of chasing a callback that was present in the source all along.
+//
+// Deletes only *.jar, and only before the jar tasks write, so the current build's outputs
+// survive and nothing else in build/ is touched.
+val pruneStaleJars by tasks.registering(Delete::class) {
+    delete(fileTree(layout.buildDirectory.dir("libs")) { include("*.jar") })
+}
+
+tasks.withType<Jar>().configureEach {
+    dependsOn(pruneStaleJars)
+}

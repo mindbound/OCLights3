@@ -6,7 +6,9 @@ import java.util.List;
 import li.cil.oc.api.Network;
 import li.cil.oc.api.machine.Arguments;
 import li.cil.oc.api.machine.Callback;
+import li.cil.oc.api.FileSystem;
 import li.cil.oc.api.machine.Context;
+import li.cil.oc.api.network.ManagedEnvironment;
 import li.cil.oc.api.machine.Machine;
 import li.cil.oc.api.network.Environment;
 import li.cil.oc.api.network.Message;
@@ -141,16 +143,39 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 	private final InputRouter inputRouter = new InputRouter();
 
 	/**
-	 * Interim component name. The legacy TE still registers "ocl_gpu" with an incompatible
-	 * API, and two components sharing a name on one network is an ambiguity Lua cannot
-	 * resolve; this becomes "ocl_gpu" at the Stage A cut-over when the legacy block set is
-	 * deleted. Component names are not save-persisted (only the node address is, under
-	 * oc:node), so the eventual rename is world-compatible.
+	 * The component name, FROZEN (2026-08-04). This is not an interim value and does not
+	 * become "ocl_gpu" at the cut-over.
+	 *
+	 * Reclaiming "ocl_gpu" was the earlier plan, on the theory that the name should follow the
+	 * mod. It was dropped because the name would be a compatibility promise the API cannot
+	 * keep: a program written against legacy ocl_gpu finds a component of the same name whose
+	 * every method has different semantics — bindTexture is gone, import is gone, coordinates
+	 * are logical rather than pixels. Answering to that name is worse than not answering.
+	 *
+	 * Freezing it now is also what makes the Lua library writable: every component.X site in
+	 * it would otherwise be written against a name a later rename invalidates.
 	 */
 	public static final String COMPONENT_NAME = "opengpu";
 
+	/**
+	 * The jar-backed read-only filesystem carrying our Lua library and tutorial.
+	 *
+	 * This is the ONLY mechanism by which a mod's Lua reaches an in-game computer, and until
+	 * now the v2 stack had none — the whole repo's single `FileSystem.fromClass` lives in the
+	 * legacy TE. That made the Lua library undeliverable and would have made deleting the old
+	 * stack silently remove the delivery path: the jar keeps shipping the files, nothing
+	 * mounts them, nothing fails to build and nothing logs.
+	 *
+	 * Deliberately rooted at `lua/v2`, NOT the legacy `lua/` tree. The legacy contents target
+	 * a dead API (`lib/gpu.lua` binds `component.ocl_gpu` and calls a dropped `import()`), so
+	 * carrying them over would ship a library that cannot work against this component.
+	 */
+	private final ManagedEnvironment fileSystem;
+
 	public TileEntityGpu2() {
 		node = Network.newNode(this, Visibility.Network).withComponent(COMPONENT_NAME).create();
+		fileSystem = FileSystem.asManagedEnvironment(
+				FileSystem.fromClass(OpenGPU.class, "oclights", "lua/v2"), COMPONENT_NAME);
 	}
 
 	// ------------------------------------------------------------------
@@ -639,6 +664,14 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 			node.save(nodeTag);
 			tag.setTag("oc:node", nodeTag);
 		}
+		// The library filesystem's node address must survive too, under the same key the
+		// legacy TE used. Without it the loot disk is re-minted on every chunk load, and any
+		// program holding its address — or an fstab entry pointing at it — breaks on reload.
+		if (fileSystem != null && fileSystem.node() != null) {
+			NBTTagCompound fsTag = new NBTTagCompound();
+			fileSystem.node().save(fsTag);
+			tag.setTag("oc:fsnode", fsTag);
+		}
 		if (worldObj == null || worldObj.isRemote) {
 			return; // stray client-side call: never touch scene persistence
 		}
@@ -720,6 +753,9 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 	@Override
 	public void readFromNBT(NBTTagCompound tag) {
 		super.readFromNBT(tag);
+		if (fileSystem != null && fileSystem.node() != null && tag.hasKey("oc:fsnode")) {
+			fileSystem.node().load(tag.getCompoundTag("oc:fsnode"));
+		}
 		if (node != null && node.host() == this && tag.hasKey("oc:node")) {
 			node.load(tag.getCompoundTag("oc:node"));
 		}
@@ -772,11 +808,36 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 		return node;
 	}
 
+	/**
+	 * Attach the library filesystem to any computer that connects, and detach on the way out.
+	 *
+	 * Same shape as the legacy TE's, and the shape matters: the filesystem node is connected
+	 * PER CONNECTING CONTEXT rather than once to the network, so a computer sees the library
+	 * exactly while it is connected to this GPU. The final branch removes the fs node when the
+	 * GPU's own node goes — without it the environment outlives its host and leaks.
+	 */
 	@Override
-	public void onConnect(Node node) {}
+	public void onConnect(Node node) {
+		// fileSystem is null when the jar resource is missing: FileSystem.fromClass returns
+		// null for an absent path and asManagedEnvironment passes that through. A packaging
+		// slip must cost the library, not the GPU — an NPE here would take down the node
+		// network's connect path for every computer that touched this block.
+		if (fileSystem != null && fileSystem.node() != null && node.host() instanceof Context) {
+			node.connect(fileSystem.node());
+		}
+	}
 
 	@Override
-	public void onDisconnect(Node node) {}
+	public void onDisconnect(Node node) {
+		if (fileSystem == null || fileSystem.node() == null) {
+			return;
+		}
+		if (node.host() instanceof Context) {
+			node.disconnect(fileSystem.node());
+		} else if (node == this.node) {
+			fileSystem.node().remove();
+		}
+	}
 
 	@Override
 	public void onMessage(Message message) {}

@@ -10,6 +10,11 @@ import java.util.Set;
 import org.lwjgl.BufferUtils;
 import org.lwjgl.opengl.GL11;
 
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.renderer.OpenGlHelper;
+import net.minecraft.util.ChatComponentText;
+import net.minecraft.util.EnumChatFormatting;
+
 import opengpu.OpenGPU;
 import opengpu.v2.protocol.V2Wire;
 import opengpu.v2.scene.ResourceInfo;
@@ -72,6 +77,38 @@ public final class SceneRenderer {
 	 * second failure anywhere in a session was silent forever.
 	 */
 	private boolean fboUnsupportedLogged;
+	private boolean fboUnsupportedTold;
+
+	/**
+	 * Which half of {@code framebufferSupported && gameSettings.fboEnable} actually failed.
+	 *
+	 * Worth distinguishing every time it is reported: one is a video option two clicks away,
+	 * the other is a machine that cannot run this mod. Telling a player "unsupported" when
+	 * they merely switched FBOs off is the misdiagnosis this whole path exists to avoid.
+	 */
+	public static String fboDiagnosis() {
+		if (!OpenGlHelper.framebufferSupported) {
+			return "This GPU/driver reports no framebuffer-object support.";
+		}
+		return "Framebuffer objects are switched OFF in Video Settings.";
+	}
+
+	/** The player will never read a log line; say it once where they are actually looking. */
+	private void notifyPlayerOnce() {
+		if (fboUnsupportedTold) {
+			return;
+		}
+		Minecraft mc = Minecraft.getMinecraft();
+		if (mc == null || mc.thePlayer == null) {
+			return; // not in a world yet — try again next frame, still only once
+		}
+		fboUnsupportedTold = true;
+		mc.thePlayer.addChatMessage(new ChatComponentText(
+				EnumChatFormatting.RED + "[OpenGPU] " + EnumChatFormatting.RESET
+						+ fboDiagnosis() + " Screens will stay blank until "
+						+ (OpenGlHelper.framebufferSupported
+								? "you re-enable them (Options → Video Settings)." : "run on hardware that supports them.")));
+	}
 
 	/** The scene's rendered texture for surfaces to draw, or -1 if not yet rendered. */
 	public int colorTextureFor(String sceneId) {
@@ -93,9 +130,16 @@ public final class SceneRenderer {
 		if (!FramebufferPass.isSupported()) {
 			if (!fboUnsupportedLogged) {
 				fboUnsupportedLogged = true;
-				OpenGPU.logger.warn("Framebuffer objects unavailable; v2 scene rendering disabled "
-						+ "(the non-FBO fallback arrives in a later increment)");
+				// No fallback renderer is coming, and the old message promising one sent
+				// anyone who read it looking for a bug instead of a setting. OpenGPU requires
+				// framebuffer objects, full stop -- but note WHICH half of the gate failed:
+				// OpenGlHelper.isFramebufferEnabled() is `framebufferSupported &&
+				// gameSettings.fboEnable`, so the overwhelmingly likely cause is the video
+				// option, which the player can simply turn back on.
+				OpenGPU.logger.warn(fboDiagnosis()
+						+ " OpenGPU screens require framebuffer objects and will stay blank.");
 			}
+			notifyPlayerOnce();
 			return;
 		}
 		pruneDeadScenes(mirrors);

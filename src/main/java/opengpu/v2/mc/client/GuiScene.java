@@ -1,6 +1,8 @@
 package opengpu.v2.mc.client;
 
 import net.minecraft.client.gui.GuiScreen;
+import net.minecraft.client.renderer.OpenGlHelper;
+import net.minecraft.util.EnumChatFormatting;
 
 import org.lwjgl.opengl.GL11;
 
@@ -203,8 +205,23 @@ public class GuiScene extends GuiScreen {
 		int[] size = sceneId != null ? runtime.renderer().sizeFor(sceneId) : null;
 		if (texture == -1 || size == null) {
 			drawnThisFrame = false;
-			String status = sceneId == null ? "GPU is initializing..." : "Awaiting scene sync...";
-			drawCenteredString(fontRendererObj, status, width / 2, height / 2, 0xFFFFFF);
+			// "Awaiting scene sync" blames the network for what is usually a video option.
+			// Without framebuffer objects there is no scene texture and never will be, so no
+			// amount of waiting helps — check that FIRST and say the actionable thing.
+			if (!opengpu.v2.mc.client.render.FramebufferPass.isSupported()) {
+				drawCenteredString(fontRendererObj, EnumChatFormatting.RED
+						+ "OpenGPU needs framebuffer objects", width / 2, height / 2 - 10, 0xFFFFFF);
+				drawCenteredString(fontRendererObj,
+						opengpu.v2.mc.client.render.SceneRenderer.fboDiagnosis(),
+						width / 2, height / 2 + 2, 0xC0C0C0);
+				if (OpenGlHelper.framebufferSupported) {
+					drawCenteredString(fontRendererObj, "Options -> Video Settings",
+							width / 2, height / 2 + 14, 0xC0C0C0);
+				}
+			} else {
+				String status = sceneId == null ? "GPU is initializing..." : "Awaiting scene sync...";
+				drawCenteredString(fontRendererObj, status, width / 2, height / 2, 0xFFFFFF);
+			}
 			super.drawScreen(mouseX, mouseY, partialTicks);
 			return;
 		}
