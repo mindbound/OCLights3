@@ -63,12 +63,29 @@ dependencies {
 // "the latest jar" out of that directory by eye is how a stale jar ends up in a test instance,
 // which cost an evening of chasing a callback that was present in the source all along.
 //
-// Deletes only *.jar, and only before the jar tasks write, so the current build's outputs
-// survive and nothing else in build/ is touched.
-val pruneStaleJars by tasks.registering(Delete::class) {
-    delete(fileTree(layout.buildDirectory.dir("libs")) { include("*.jar") })
-}
-
-tasks.withType<Jar>().configureEach {
-    dependsOn(pruneStaleJars)
+// Implemented as a doLast on `build` that touches only *.jar, ADDING NO GRAPH EDGES.
+//
+// The first version registered a Delete task and wired it with
+//   tasks.withType<Jar>().configureEach { dependsOn(pruneStaleJars) }
+// which passed every local build and broke CI with a Gradle-internal
+// ConcurrentModificationException in NodeSets during execution-plan finalization. Adding a
+// dependency from configureEach mutates the task graph as Jar tasks are REALIZED, and FPGradle
+// realizes several of them lazily, so Gradle ended up modifying a node set it was iterating.
+// Local runs missed it because they used --no-daemon with a cold configuration cache; CI reuses
+// the configuration and build caches with parallel workers, so tasks realize in a different
+// order. Task-graph shape is precisely the thing local builds cannot verify.
+//
+// Keeping by modification time rather than by version string avoids coupling to how FPGradle
+// derives the version -- which is itself configuration-cached and was the reason a build could
+// emit a jar named after an older commit than HEAD.
+tasks.named("build") {
+    val libsDir = layout.buildDirectory.dir("libs")
+    doLast {
+        val dir = libsDir.get().asFile
+        val jars = dir.listFiles()?.filter { it.isFile && it.name.endsWith(".jar") } ?: emptyList()
+        if (jars.isEmpty()) return@doLast
+        val newest = jars.maxOf { it.lastModified() }
+        val staleAfterMillis = 10L * 60L * 1000L
+        jars.filter { newest - it.lastModified() > staleAfterMillis }.forEach { it.delete() }
+    }
 }
