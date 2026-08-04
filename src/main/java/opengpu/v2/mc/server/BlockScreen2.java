@@ -187,8 +187,8 @@ public class BlockScreen2 extends BlockContainer {
 	@Override
 	@SideOnly(Side.CLIENT)
 	public void registerBlockIcons(IIconRegister register) {
-		blockIcon = register.registerIcon("oclights:gpusides");
-		front = register.registerIcon("oclights:gpufront");
+		blockIcon = register.registerIcon(OpenGPU.ASSET_DOMAIN + ":gpusides");
+		front = register.registerIcon(OpenGPU.ASSET_DOMAIN + ":gpufront");
 	}
 
 	/**

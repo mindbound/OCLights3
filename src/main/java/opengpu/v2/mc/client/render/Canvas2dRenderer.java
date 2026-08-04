@@ -30,7 +30,8 @@ import opengpu.v2.scene.SceneState;
  * (blend off); pending textures draw nothing (the defined transparent placeholder).
  */
 public final class Canvas2dRenderer {
-	private static final ResourceLocation FONT = new ResourceLocation("oclights", "textures/gui/ascii.png");
+	private static final ResourceLocation FONT =
+			new ResourceLocation(opengpu.OpenGPU.ASSET_DOMAIN, "textures/gui/ascii.png");
 	private static final int OVAL_SEGMENTS = 48;
 
 	/** Row-major 2D affine: x' = a*x + c*y + e; y' = b*x + d*y + f. */

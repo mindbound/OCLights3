@@ -30,6 +30,25 @@ public class OpenGPU {
 	@SidedProxy(serverSide = Tags.ROOT_PKG + ".CommonProxy", clientSide = Tags.ROOT_PKG + ".client.ClientProxy")
 	public static CommonProxy proxy;
 	
+	/**
+	 * The resource domain for this mod's assets — {@code assets/opengpu/}.
+	 *
+	 * Lowercase and deliberately NOT {@code Tags.MOD_ID}, which is mixed-case "OpenGPU";
+	 * resource domains are conventionally lowercase and the two are unrelated identifiers.
+	 * Renamed from "oclights" on 2026-08-04 with the rest of the OCLights inheritance.
+	 *
+	 * A constant because the domain is referenced from block icon registration, the font
+	 * ResourceLocation and the loot filesystem mount, and every one of those fails at RUNTIME
+	 * ONLY — a wrong icon domain is a missing-texture placeholder and a wrong filesystem domain
+	 * is a silently null mount. Neither the compiler nor any test can see either.
+	 *
+	 * {@link opengpu.v2.mc.FontMetrics} deliberately does NOT use this constant: it is
+	 * Minecraft-free so the server can compute text metrics headlessly, and referencing this
+	 * class would drag Block/Item/CreativeTabs onto its classpath. It carries its own copy with
+	 * a pointer back here.
+	 */
+	public static final String ASSET_DOMAIN = "opengpu";
+
 	public static Block gpu2, screen2;
 	public static Logger logger;
 	

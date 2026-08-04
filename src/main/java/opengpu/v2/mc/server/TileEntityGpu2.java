@@ -175,7 +175,7 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 	public TileEntityGpu2() {
 		node = Network.newNode(this, Visibility.Network).withComponent(COMPONENT_NAME).create();
 		fileSystem = FileSystem.asManagedEnvironment(
-				FileSystem.fromClass(OpenGPU.class, "oclights", "lua/v2"), COMPONENT_NAME);
+				FileSystem.fromClass(OpenGPU.class, OpenGPU.ASSET_DOMAIN, "lua/v2"), COMPONENT_NAME);
 	}
 
 	// ------------------------------------------------------------------

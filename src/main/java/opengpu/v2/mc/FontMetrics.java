@@ -19,7 +19,14 @@ import javax.imageio.ImageIO;
  * ImageIO decode only — no AWT rasterization, headless-safe on dedicated servers.
  */
 public final class FontMetrics {
-	public static final String ATLAS_RESOURCE = "/assets/oclights/textures/gui/ascii.png";
+	/**
+	 * Deliberately a literal rather than {@code OpenGPU.ASSET_DOMAIN}, which holds the same
+	 * value. This class must stay Minecraft-free so a dedicated server can answer
+	 * {@code getTextWidth} headlessly, and referencing the {@code @Mod} class would drag
+	 * Block, Item and CreativeTabs onto its classpath. Keep the two in step by hand: if the
+	 * asset domain is ever renamed again, this line changes with it.
+	 */
+	public static final String ATLAS_RESOURCE = "/assets/opengpu/textures/gui/ascii.png";
 	/** Logical glyph height; the atlas cell is normalized to 8 units like vanilla. */
 	public static final int GLYPH_HEIGHT = 8;
 

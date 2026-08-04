@@ -14,7 +14,7 @@
       "gamax92"
     ],
     "credits": "Originally a revival of OCLights2 / CCLights2 by ds84182 et al.; the inherited pipeline has since been replaced in full. Uses OpenComputers (MIT) by Sangar.",
-    "logoFile": "assets/oclights/textures/blocks/gpufront.png",
+    "logoFile": "assets/opengpu/textures/blocks/gpufront.png",
     "screenshots": [],
     "dependencies": ["OpenComputers"]
   }
