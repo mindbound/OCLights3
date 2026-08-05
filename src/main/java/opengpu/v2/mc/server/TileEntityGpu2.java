@@ -70,9 +70,16 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 	 *     Monotone, never reused, and independent of both of the above.</li>
 	 * </ul>
 	 *
-	 * 1 = the v2 surface as first shipped. 2 = adds getVersion/getLimits.
+	 * 1 = the v2 surface as first shipped. 2 = adds getVersion/getLimits. 3 = adds swapVisibility.
+	 *
+	 * The "SAME change" rule above is not decoration: level 3 was late, because swapVisibility
+	 * shipped in the commit after the one that introduced this constant and nobody bumped it. For
+	 * that window {@code getVersion().api} reported 2 on builds that HAD swapVisibility and on
+	 * builds that did not, which is precisely the distinction the field exists to make — a
+	 * feature-detecting program would have concluded the callback was absent and taken the
+	 * fallback path forever.
 	 */
-	public static final int API_LEVEL = 2;
+	public static final int API_LEVEL = 3;
 	/** Server-side VRAM budget in bytes (textures w*h*4 + canvas command capacity estimate). */
 	public static final long VRAM_BUDGET_BYTES = 16L * 1024 * 1024;
 	/** Budget estimate per canvas command slot (id + args worst case, serialized). */
@@ -2005,12 +2012,26 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 	 * {@link opengpu.v2.scene.ServerScene#swapVisibility}, which is where the all-or-nothing
 	 * property is established and tested. Refusals here change nothing at all.
 	 */
-	@Callback(direct = true, limit = 256, doc = "function(hideNodeId:number, showNodeId:number) -- Atomically hide one node and show another, in one batch. Compose a frame into a hidden canvas node across as many canvasSubmit calls as it needs, then swap it in: the viewer never sees a partial frame. Refuses two equal ids.")
+	@Callback(direct = true, limit = 256, doc = "function(hideNodeId:number, showNodeId:number[, epoch:number]) -- Atomically hide one node and show another, in one batch. Compose a frame into a hidden canvas node across as many canvasSubmit calls as it needs, then swap it in: the viewer never sees a partial frame. Refuses two equal ids; pass epoch from getEpoch() to reject handles from a previous scene.")
 	public Object[] swapVisibility(Context context, Arguments args) throws Exception {
 		int hideId = args.checkInteger(0);
 		int showId = args.checkInteger(1);
 		synchronized (sceneLock) {
 			requireScene();
+			// Same optional epoch guard canvasSubmit carries, and needed for the same reason.
+			// Node ids are scene-scoped and allocated from a counter that RESTARTS when a scene is
+			// re-created, so a program holding ids across a re-creation is not holding invalid
+			// ids — it is holding ids that now name DIFFERENT nodes. Without this the call
+			// succeeds and swaps two strangers, on the server and on every mirror identically, so
+			// no convergence check can see it. The Lua wrapper's liveness check cannot cover this
+			// either: it only knows what THIS handle did, not that the scene beneath it was
+			// replaced.
+			//
+			// Optional, matching canvasSubmit: a program that never caches ids across a
+			// re-creation should not be forced to thread an epoch through every call.
+			if (args.count() > 2 && args.checkInteger(2) != scene.epoch()) {
+				throw new Exception("stale node handle: the scene was re-created");
+			}
 			requireNodeLocked(hideId);
 			requireNodeLocked(showId);
 			scene.swapVisibility(hideId, showId);

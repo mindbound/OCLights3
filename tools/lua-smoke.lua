@@ -9,13 +9,29 @@ package.path = package.path .. ";./src/main/resources/assets/opengpu/lua/v2/lib/
 
 -- ---- stubs -----------------------------------------------------------------
 local calls = {}
-local nextId = 0
+--[[
+  TWO id counters, because the server has two.
+
+  SceneState allocates resource ids and node ids from independent sequences, so a canvas id and a
+  node id are routinely the SAME small integer for different objects. A stub with one shared
+  counter cannot represent that, and so cannot expose any confusion between the two spaces -- it
+  makes every id globally unique, which is the one property the real server does not have. That
+  blind spot is exactly why five swap checks passed against a guard that accepted a Canvas handle
+  and posted its RESOURCE id as a NODE id.
+
+  They are deliberately OFFSET as well as separate, so a test that mixes them up gets a wrong
+  answer rather than an accidentally-right one.
+]]
+local nextResourceId, nextNodeId = 0, 100
 local function record(name)
   return setmetatable({}, { __call = function(_, ...)
     calls[#calls + 1] = { name = name, args = table.pack(...) }
-    if name == "createCanvas" or name == "createCanvasNode" or name == "createSprite" then
-      nextId = nextId + 1
-      return nextId
+    if name == "createCanvas" then
+      nextResourceId = nextResourceId + 1
+      return nextResourceId
+    elseif name == "createCanvasNode" or name == "createSprite" then
+      nextNodeId = nextNodeId + 1
+      return nextNodeId
     elseif name == "canvasOps" then
       return {
         fill = { op = 1, args = 0 }, plot = { op = 2, args = 2 }, line = { op = 3, args = 4 },
@@ -60,17 +76,28 @@ end
 -- by whatever the server says, not by a number compiled into the library -- that hardcoding is
 -- what this callback exists to remove, so a test that only ever sees the default value would
 -- pass just as happily against the bug.
-local tinyProxy = { address = "tiny-address", type = "opengpu" }
+-- NOTE the address is re-set AFTER the copy loop, in this fixture and the one below. `pairs(proxy)`
+-- copies proxy.address too, so setting it first is silently undone -- every derived proxy then
+-- claims to be the primary GPU. That masked the cross-GPU guard: the wrapper tables differed while
+-- the addresses were accidentally identical, so an identity check passed for the wrong reason and
+-- an address check failed for the right one.
+local tinyProxy = { type = "opengpu" }
 for k, v in pairs(proxy) do tinyProxy[k] = v end
+tinyProxy.address = "tiny-address"
 tinyProxy.getLimits = setmetatable({}, { __call = function()
   return { submitBytes = 1024, submitBytesPerTick = 2048, commandCap = 4096, textChars = 40 }
 end })
 
 -- A component predating both callbacks. Must still bind, on the shipped fallbacks.
-local oldProxy = { address = "old-address", type = "opengpu" }
+local oldProxy = { type = "opengpu" }
 for k, v in pairs(proxy) do oldProxy[k] = v end
+oldProxy.address = "old-address"
 oldProxy.getLimits = nil
 oldProxy.getVersion = nil
+-- Also predates swapVisibility. The fixture previously kept it, so the stale-proxy path -- the
+-- one that has actually bitten in game, where OpenOS serves a cached proxy after a jar update --
+-- was unreachable by the suite, and hit "attempt to call a nil value" inside the library.
+oldProxy.swapVisibility = nil
 
 package.loaded["component"] = setmetatable({ opengpu = proxy, proxy = function(a)
                                                  if a == "stub-address" then return proxy end
@@ -185,8 +212,14 @@ tc:discard()
 -- ---- the double-buffer swap ------------------------------------------------
 
 local front = gpu:show(gpu:canvas(32, 32))
-local back = gpu:show(gpu:canvas(32, 32))
-back:setVisible(false)
+local backCanvas = gpu:canvas(32, 32)
+local beforeHidden = #calls
+local back = gpu:show(backCanvas, { visible = false })
+check(calls[#calls].name == "setNodeVisible" and calls[#calls].args[2] == false,
+      "show{visible = false} hides the node immediately, so the documented back-buffer setup "
+      .. "does not flash an empty buffer over the real frame")
+check(#calls == beforeHidden + 2, "and it costs exactly the create plus the hide",
+      tostring(#calls - beforeHidden))
 
 local before = #calls
 check(front:swapWith(back) == back, "swapWith returns the node now on screen, so it chains")
@@ -196,11 +229,31 @@ check(#calls == before + 1, "and it is ONE call, not two setVisible -- two could
 check(calls[#calls].name == "swapVisibility", "it calls swapVisibility")
 check(calls[#calls].args[1] == front.id and calls[#calls].args[2] == back.id,
       "with hide-then-show argument order")
+check(calls[#calls].args[3] == 12345,
+      "and the scene epoch, so the SERVER can reject ids cached across a re-creation -- the "
+      .. "library's own checkAlive cannot, since it compares against a gpu.epoch read at bind()",
+      tostring(calls[#calls].args[3]))
 
 check(not pcall(function() front:swapWith(front) end), "swapping a node with itself is refused")
 check(not pcall(function() front:swapWith(nil) end), "swapWith(nil) is refused")
 check(not pcall(function() front:swapWith({ id = 7 }) end),
       "swapWith refuses a table that is not a node")
+
+-- THE one that was missing, and the reason three reviewers found the same defect. A Canvas has
+-- kind = "canvas" and an id of its own, so a duck-type check on those two fields accepts it --
+-- and its RESOURCE id then goes to swapVisibility as a NODE id. Separate id spaces, both small
+-- integers, so they collide: "Unknown node", or worse, the wrong node revealed with a success
+-- return. A `{ id = 7 }` literal never caught this because it has no `kind`.
+local strayCanvas = gpu:canvas(8, 8)
+check(strayCanvas.id ~= front.id and strayCanvas.id ~= back.id,
+      "precondition: the stub gives resources and nodes DIFFERENT ids, so a mix-up is detectable",
+      "canvas " .. tostring(strayCanvas.id) .. " vs nodes " .. tostring(front.id) .. "/"
+      .. tostring(back.id))
+local okCanvas, errCanvas = pcall(function() front:swapWith(strayCanvas) end)
+check(not okCanvas, "swapWith refuses a CANVAS handle where a node is required")
+check(okCanvas or tostring(errCanvas):find("canvas", 1, true) ~= nil,
+      "and the message names what was passed, not just that it was wrong", errCanvas)
+strayCanvas:free()
 
 local strayGpu = opengpu.bind("old-address")
 local stray = strayGpu:show(strayGpu:canvas(16, 16))
@@ -208,6 +261,15 @@ check(not pcall(function() front:swapWith(stray) end),
       "swapWith refuses a node belonging to a DIFFERENT gpu -- node ids are scene-scoped, so "
       .. "the ids would collide silently and reveal the wrong node")
 stray:free()
+
+-- checkAlive(OTHER) had no coverage: deleting it left the whole suite green, because every
+-- existing case freed `self` rather than the argument. Free the target only.
+local liveOne = gpu:show(gpu:canvas(16, 16))
+local deadOne = gpu:show(gpu:canvas(16, 16), { visible = false })
+deadOne:free()
+check(not pcall(function() liveOne:swapWith(deadOne) end),
+      "swapWith refuses a freed TARGET, not just a freed self")
+liveOne:free()
 
 back:free()
 front:free()
@@ -217,6 +279,14 @@ check(not pcall(function() front:swapWith(back) end), "a freed node cannot be sw
 local old = opengpu.bind("old-address")
 check(old:limits().submitBytes == 65536, "a component without getLimits falls back, not fails")
 check(old:version() == nil, "version() is nil rather than fabricated when unsupported")
+
+local oldA = old:show(old:canvas(8, 8))
+local oldB = old:show(old:canvas(8, 8))
+local okOld, errOld = pcall(function() oldA:swapWith(oldB) end)
+check(not okOld, "swapWith on a component predating it raises rather than calling nil")
+check(okOld or tostring(errOld):find("REBOOT", 1, true) ~= nil,
+      "and the message says to reboot the computer -- OpenOS caches the proxy, so a client "
+      .. "restart does not pick up a new callback", errOld)
 
 print(string.format("=== %d passed, %d failed ===", pass, fail))
 os.exit(fail == 0 and 0 or 1)

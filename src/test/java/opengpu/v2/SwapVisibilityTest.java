@@ -42,10 +42,24 @@ import opengpu.v2.scene.ServerScene;
  * Drawing into a hidden node needs none of that: content assembled where nothing is looking does
  * not have to be atomic, only the reveal does.
  *
- * <h2>What these tests pin</h2>
+ * <h2>What these tests pin, and the one thing NOTHING pins</h2>
  * Every test here is headless. The mechanism is pure scene/delta semantics, which is the half of
- * this feature that a JVM test CAN see — the callback wiring on {@code TileEntityGpu2} needs Forge
- * and is in-game only, so that half is deliberately not claimed here.
+ * this feature a JVM test CAN see — the callback wiring on {@code TileEntityGpu2} needs Forge and
+ * is in-game only, so that half is deliberately not claimed here.
+ *
+ * <p><b>The property the feature actually rests on is verifiable by no channel this project has:
+ * that no seal can fall BETWEEN the two staged deltas.</b> It holds because
+ * {@code TileEntityGpu2.swapVisibility} holds {@code sceneLock} across both {@code applyAndStage}
+ * calls while {@code serverPump} takes the same lock before {@code host.tick -> sealBatch}. That
+ * is proven by construction — by reading the locking — and not by anything below. A JVM test
+ * drives {@code ServerScene} directly with no tile entity and no server thread, so it cannot even
+ * express the interleaving; an in-game run cannot force it either. Every test here would still
+ * pass if that lock were removed tomorrow.
+ *
+ * <p>Recorded rather than papered over, because the tempting reading of a green suite is that the
+ * atomicity is tested. It is not. What is tested is everything downstream of it: that the pair is
+ * all-or-nothing on validation, ordered hide-first, carried whole through the codec, invisible to
+ * a mid-compose snapshot, and applied by the mirror in one dirty cycle.
  */
 public class SwapVisibilityTest {
 
@@ -212,6 +226,40 @@ public class SwapVisibilityTest {
 		assertEquals("and the new one appears whole, all 7 chunks of it",
 				7 * 40, visibleThrough(mirror, back).size());
 		assertTrue("server and mirror agree", server.state().contentEquals(mirror.state()));
+	}
+
+	@Test
+	public void aHiddenBackBufferSurvivesASNAPSHOTStillHidden() throws Exception {
+		// Nothing in the repository round-tripped a HIDDEN node through a snapshot before this.
+		// It matters more here than for any other property, because a client entering range gets
+		// a snapshot rather than the batch history: if visibility did not survive it, that client
+		// would see the back buffer -- a half-composed frame -- while everyone already watching
+		// saw the correct one. Server and mirrors would still "converge" on contentEquals for the
+		// watchers who never resynced, so nothing downstream could report it.
+		ServerScene server = freshScene();
+		int frontCanvas = server.createCanvas(48, 48, CAP);
+		int backCanvas = server.createCanvas(48, 48, CAP);
+		int front = server.createNode(V2Wire.NODE_CANVAS, frontCanvas);
+		int back = server.createNode(V2Wire.NODE_CANVAS, backCanvas);
+		server.setVisible(back, false);
+		// Half-compose the back buffer, exactly as a program mid-frame would have it.
+		server.submitCanvas(backCanvas, BatchCodec.decodeCommandList(pack(9)), true, 700);
+		server.sealBatch();
+
+		SceneMirror latecomer = new SceneMirror(SCENE);
+		latecomer.applySnapshot(server.snapshot());
+
+		assertTrue("the front buffer arrives visible",
+				latecomer.state().nodes.get(Integer.valueOf(front)).visible);
+		assertFalse("and the half-composed back buffer arrives HIDDEN, not shown mid-compose",
+				latecomer.state().nodes.get(Integer.valueOf(back)).visible);
+		assertTrue(server.state().contentEquals(latecomer.state()));
+
+		// And the swap still reveals correctly for a client that joined mid-compose.
+		server.swapVisibility(front, back);
+		ship(server, latecomer);
+		assertFalse(latecomer.state().nodes.get(Integer.valueOf(front)).visible);
+		assertTrue(latecomer.state().nodes.get(Integer.valueOf(back)).visible);
 	}
 
 	@Test

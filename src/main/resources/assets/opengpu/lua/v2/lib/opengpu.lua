@@ -292,6 +292,12 @@ end
 -- ---------------------------------------------------------------------------
 -- Node handle
 
+-- Forward declaration. Canvas is defined further down, but Node:swapWith needs to name it to tell
+-- a caller who passed a canvas what they actually passed. Without this the identifier resolves to
+-- a GLOBAL inside every Node method -- nil, silently, so the comparison is simply never true and
+-- the branch is dead code that still reads like it works.
+local Canvas
+
 local Node = {}
 Node.__index = Node
 
@@ -352,18 +358,49 @@ end
 ]]
 function Node:swapWith(other)
   checkAlive(self, "swapWith")
-  if type(other) ~= "table" or other.kind == nil or other.id == nil then
-    error("swapWith needs another node, got " .. type(other), 2)
+  if self.gpu.raw.swapVisibility == nil then
+    error("this opengpu component predates swapVisibility; update the jar and REBOOT the "
+          .. "computer (OpenOS caches the component proxy, so a client restart is not enough)", 2)
+  end
+  --[[
+    Identity by METATABLE, not by duck-typing the fields.
+
+    The first version tested `other.kind ~= nil and other.id ~= nil`, which a CANVAS satisfies:
+    canvases carry kind = "canvas" and an id of their own. So a canvas handle passed here sailed
+    through and its RESOURCE id was handed to swapVisibility as a NODE id. Those are separate id
+    spaces, both small integers starting near 1, so they collide constantly -- the call either
+    raised a confusing "Unknown node" or, when a node happened to hold that number, silently
+    revealed the WRONG node while returning success.
+
+    Nor does `kind` disambiguate on its own: a canvas is "canvas" and a canvas NODE is
+    "canvas node", one substring apart. The metatable is the only thing that actually says what
+    this object is.
+  ]]
+  if getmetatable(other) ~= Node then
+    local what = type(other)
+    if what == "table" and getmetatable(other) == Canvas then
+      what = "a canvas -- pass the NODE showing it (from gpu:show(canvas)), not the canvas"
+    end
+    error("swapWith needs another node, got " .. what, 2)
   end
   checkAlive(other, "swapWith")
-  if other.gpu ~= self.gpu then
-    error("swapWith needs two nodes on the SAME gpu; a node cannot be revealed by another "
-          .. "screen's scene", 2)
+  -- By ADDRESS, not by table identity. Two bind() calls to the same GPU produce two different
+  -- Gpu tables whose nodes live in one scene and swap perfectly well; comparing the wrappers
+  -- would refuse that with a message blaming the wrong thing. The address is the device.
+  if other.gpu.address ~= self.gpu.address then
+    error("swapWith needs two nodes on the SAME gpu; node ids are scene-scoped, so an id from "
+          .. "another screen's scene would name a different node here, not an absent one", 2)
   end
   if other.id == self.id then
     error("swapWith needs two different nodes", 2)
   end
-  call("swapVisibility", self.gpu.raw.swapVisibility, self.id, other.id)
+  -- The epoch goes to the SERVER because checkAlive above cannot answer this question. It
+  -- compares self.epoch against self.gpu.epoch, and gpu.epoch was read once at bind() -- so if
+  -- the scene is re-created AFTER binding, both are equally stale and the comparison passes.
+  -- Only the server knows the live epoch. Without this backstop a program holding node ids
+  -- across a re-creation swaps two strangers: the ids are valid, just no longer the ones it
+  -- meant, and server and every mirror agree on the wrong answer.
+  call("swapVisibility", self.gpu.raw.swapVisibility, self.id, other.id, self.epoch)
   return other
 end
 
@@ -406,7 +443,7 @@ end
 -- ---------------------------------------------------------------------------
 -- Canvas handle
 
-local Canvas = {}
+Canvas = {}   -- forward-declared above, so Node methods can name it
 Canvas.__index = Canvas
 
 --[[
@@ -677,7 +714,23 @@ function Gpu:canvas(width, height, commandCap)
 end
 
 --- Composite a canvas above the display canvas as a node.
-function Gpu:show(canvas)
+--[[
+  Show a canvas as a node. `opts.visible = false` creates it hidden.
+
+  That option exists to close a race in the double-buffer setup this library recommends. Writing
+  `local back = gpu:show(b); back:setVisible(false)` is TWO calls, and the node is created
+  visible: if a batch seals between them -- which it may, since they are separate direct calls and
+  the seal runs on the server thread -- viewers get one frame of an empty back buffer over the
+  real one. That is a smaller version of exactly the tear swapWith exists to prevent, in the code
+  the documentation tells people to write.
+
+  A hidden node still costs the createCanvasNode call; there is no way to make node creation and
+  the hide one delta without a server-side change, so this issues setNodeVisible immediately and
+  accepts a one-call window in which nothing has been DRAWN into the canvas yet. An empty canvas
+  renders nothing, so the window is invisible in practice -- unlike the version where the canvas
+  already holds the previous frame.
+]]
+function Gpu:show(canvas, opts)
   if getmetatable(canvas) ~= Canvas then
     error("show expects a canvas created by gpu:canvas()", 2)
   end
@@ -687,6 +740,9 @@ function Gpu:show(canvas)
     gpu = self, id = id, kind = "canvas node", valid = true, epoch = self.epoch,
   }, Node)
   self.nodes[id] = n
+  if opts and opts.visible == false then
+    n:setVisible(false)
+  end
   return n
 end
 
