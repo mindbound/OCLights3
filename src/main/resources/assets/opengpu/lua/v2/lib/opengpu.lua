@@ -126,9 +126,24 @@ end
     * astral characters, which it writes as surrogate PAIRS rather than one 4-byte sequence.
   Neither can render anyway -- the font atlas holds 256 glyphs.
 ]]
-local MAX_TEXT_CHARS = 8192   -- V2Wire.MAX_TEXT_CHARS, enforced per command server-side
+--[[
+  Structural caps. FETCHED from getLimits() at bind() time; the values here are only a fallback
+  for a component too old to answer it.
 
-local function packUTF(s)
+  A library that hardcodes a server constant is wrong the first time the constant moves, and
+  submitBytes moved: it used to be the per-call ceiling AND the per-tick allowance AND the
+  per-batch bound at once, which made every frame over 64 KiB undeliverable. Separating them is
+  what fixed it, so keeping `submitBytes` and `submitBytesPerTick` distinct here is load-bearing
+  rather than tidy -- a caller CHUNKS by the first and PACES by the second.
+]]
+local FALLBACK_LIMITS = {
+  submitBytes = 65536,          -- V2Wire.MAX_SUBMIT_BYTES
+  submitBytesPerTick = 131072,  -- V2Wire.MAX_SUBMIT_BYTES_PER_TICK
+  commandCap = 4096,            -- TileEntityGpu2.CANVAS_COMMAND_CAP
+  textChars = 8192,             -- V2Wire.MAX_TEXT_CHARS
+}
+
+local function packUTF(s, maxChars)
   -- Walk the string as UTF-8, validating as we go and counting CHARACTERS -- the server's cap
   -- is in characters while the wire length is in bytes, and the two differ for anything above
   -- ASCII. Validating matters more than it looks: readUTF answers a malformed sequence by
@@ -162,8 +177,9 @@ local function packUTF(s)
     i = i + len
     chars = chars + 1
   end
-  if chars > MAX_TEXT_CHARS then
-    error("drawText: string too long (" .. chars .. " characters, max " .. MAX_TEXT_CHARS .. ")", 4)
+  maxChars = maxChars or FALLBACK_LIMITS.textChars
+  if chars > maxChars then
+    error("drawText: string too long (" .. chars .. " characters, max " .. maxChars .. ")", 4)
   end
   return string.char(math.floor(n / 256), n % 256) .. s
 end
@@ -172,21 +188,24 @@ end
 -- Command buffer
 
 --[[
-  One canvasSubmit may carry at most this many bytes (V2Wire.MAX_SUBMIT_BYTES).
+  The buffer chunks by `limits.submitBytes` -- the PER-CALL ceiling, which is what one
+  canvasSubmit may carry.
 
-  Distinct from the per-tick allowance, and it fails differently: over this the callback THROWS
-  rather than returning the retryable `false`, so there is nothing to wait for. It is also
-  tighter than it looks -- a command costs 1 + 8*argc bytes, so a setColor+filledRectangle pair
-  is 66 bytes and only ~992 pairs fit. A canvas created with the default 4096-command cap
-  therefore cannot send a full frame in one call, which is why submit() chunks.
+  Genuinely distinct from `limits.submitBytesPerTick`, and they fail differently: over the
+  per-call ceiling the callback THROWS, so there is nothing to wait for; over the per-tick
+  allowance it returns the retryable `false`. It is also tighter than it looks -- a command costs
+  1 + 8*argc bytes, so a setColor+filledRectangle pair is 66 bytes and only ~992 pairs fit. A
+  canvas at the default command cap therefore cannot send a full frame in one call, which is why
+  submit() chunks at all.
 ]]
-local MAX_SUBMIT_BYTES = 65536
-
 local Buffer = {}
 Buffer.__index = Buffer
 
-local function newBuffer(ops)
-  return setmetatable({ ops = ops, parts = {}, sizes = {}, n = 0, size = 0 }, Buffer)
+local function newBuffer(ops, limits)
+  return setmetatable({
+    ops = ops, limits = limits or FALLBACK_LIMITS,
+    parts = {}, sizes = {}, n = 0, size = 0,
+  }, Buffer)
 end
 
 function Buffer:reset()
@@ -213,7 +232,7 @@ function Buffer:chunks()
   local out, start, bytes = {}, 1, 0
   for i = 1, self.n do
     local sz = self.sizes[i]
-    if bytes + sz > MAX_SUBMIT_BYTES - 4 and i > start then
+    if bytes + sz > self.limits.submitBytes - 4 and i > start then
       out[#out + 1] = { from = start, to = i - 1 }
       start, bytes = i, 0
     end
@@ -249,10 +268,10 @@ function Buffer:op(name, args, text)
     out[#out + 1] = packDouble(checkNumber(name .. " arg " .. i, args[i]))
   end
   if text ~= nil then
-    out[#out + 1] = packUTF(text)
+    out[#out + 1] = packUTF(text, self.limits.textChars)
   end
   local part = table.concat(out)
-  if #part > MAX_SUBMIT_BYTES - 4 then
+  if #part > self.limits.submitBytes - 4 then
     -- A single command too big to ever send. Only drawText can reach this, and only with a
     -- string longer than any font could render; refuse it here so it cannot wedge the buffer.
     error(name .. " encodes to " .. #part .. " bytes, more than one submit can carry", 3)
@@ -264,7 +283,8 @@ function Buffer:op(name, args, text)
   return self
 end
 
---- Encoded size of the pending frame, in bytes. See MAX_SUBMIT_BYTES for why this matters.
+--- Encoded size of the pending frame, in bytes. Compare against gpu:limits() to see whether it
+--- fits one call (submitBytes) and whether it fits one tick (submitBytesPerTick).
 function Buffer:byteSize()
   return self.size + 4
 end
@@ -610,7 +630,7 @@ function Gpu:canvas(width, height, commandCap)
   end
   local c = setmetatable({
     gpu = self, id = id, kind = "canvas", valid = true, epoch = self.epoch,
-    width = width, height = height, buffer = newBuffer(self.ops),
+    width = width, height = height, buffer = newBuffer(self.ops, self.lim),
   }, Canvas)
   self.canvases[id] = c
   return c
@@ -654,6 +674,36 @@ function Gpu:clearNodes()
   return call("clearNodes", self.raw.clearNodes)
 end
 
+--[[
+  The structural caps this GPU enforces, as a table. Read at bind() and never re-read.
+
+  Chunk by `submitBytes`, pace by `submitBytesPerTick`. They are different numbers answering
+  different questions, and treating them as one is what made frames over 64 KiB undeliverable.
+  A frame larger than submitBytesPerTick still publishes, but spans ticks and may show torn for
+  one of them; `Canvas:pending()` tells you the size before you send anything.
+]]
+function Gpu:limits()
+  local out = {}
+  for k, v in pairs(self.lim) do out[k] = v end
+  return out
+end
+
+--[[
+  Version identity: `{ api = number, protocol = number, mod = string }`, or nil on a component
+  too old to answer.
+
+  Branch on `api >= N` for feature detection -- it is monotone and independent of both the wire
+  protocol (which a program cannot observe) and the mod version (which moves on releases that
+  change nothing callable).
+]]
+function Gpu:version()
+  if not self.ver then return nil end
+  local out = {}
+  for k, v in pairs(self.ver) do out[k] = v end
+  return out
+end
+
+--- Bytes still admissible this tick, and the per-tick ceiling they are measured against.
 function Gpu:submitBudget() return call("getSubmitBudget", self.raw.getSubmitBudget) end
 function Gpu:epochOf() return call("getEpoch", self.raw.getEpoch) end
 
@@ -753,11 +803,31 @@ function opengpu.bind(address, opts)
     error("this opengpu component predates canvasOps; the mod and this library disagree "
           .. "-- if the jar was just updated, reboot the computer", 2)
   end
+  -- Fetched once at bind, not per call: these are structural constants, and re-reading them on
+  -- every submit would spend call budget to learn something that cannot have changed.
+  --
+  -- Tolerant of absence rather than fatal, unlike canvasOps above. Op ids are unguessable, so a
+  -- component without canvasOps cannot be driven at all; the limits have known fallbacks, so an
+  -- older component stays usable on the values it shipped with. The asymmetry is deliberate.
+  local lim = FALLBACK_LIMITS
+  if raw.getLimits ~= nil then
+    local fetched = call("getLimits", raw.getLimits)
+    if type(fetched) == "table" then
+      lim = {}
+      for k, v in pairs(FALLBACK_LIMITS) do lim[k] = v end
+      for k, v in pairs(fetched) do
+        if type(v) == "number" and v > 0 then lim[k] = math.floor(v) end
+      end
+    end
+  end
+
   local gpu = setmetatable({
     raw = raw,
     address = raw.address,
     ops = call("canvasOps", raw.canvasOps),
     epoch = call("getEpoch", raw.getEpoch),
+    lim = lim,
+    ver = raw.getVersion ~= nil and call("getVersion", raw.getVersion) or nil,
     canvases = {},
     nodes = {},
   }, Gpu)

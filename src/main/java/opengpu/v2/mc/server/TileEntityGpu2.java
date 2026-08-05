@@ -21,6 +21,7 @@ import net.minecraft.network.Packet;
 import net.minecraft.network.play.server.S35PacketUpdateTileEntity;
 import net.minecraft.tileentity.TileEntity;
 import opengpu.OpenGPU;
+import opengpu.Tags;
 import opengpu.v2.mc.FontMetrics;
 import opengpu.v2.persist.DirectoryResourceStore;
 import opengpu.v2.protocol.MessageCodec;
@@ -52,6 +53,26 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 	public static final int DEFAULT_HEIGHT = 288;
 	public static final int CANVAS_COMMAND_CAP = 4096;
 	public static final int PUSH_DEPTH_CAP = 16;
+	/**
+	 * The Lua-facing API generation, reported by {@link #getVersion}. Bump it in the SAME change
+	 * that adds a callback.
+	 *
+	 * Deliberately neither {@code PROTOCOL_VERSION} nor the mod version, because the three answer
+	 * different questions — and this codebase has already paid once for one number serving several
+	 * roles (see MAX_SUBMIT_BYTES and PERF-BASELINE.md):
+	 * <ul>
+	 * <li>{@code PROTOCOL_VERSION} is the WIRE contract between server and client. It bumps on a
+	 *     layout change and implies a save migration. A Lua program cannot observe it and cannot
+	 *     do anything about it.</li>
+	 * <li>the mod version is human-facing and moves on every release, including releases that
+	 *     change nothing a program can call.</li>
+	 * <li>this is the one a PROGRAM can branch on: "does this build have everything up to N".
+	 *     Monotone, never reused, and independent of both of the above.</li>
+	 * </ul>
+	 *
+	 * 1 = the v2 surface as first shipped. 2 = adds getVersion/getLimits.
+	 */
+	public static final int API_LEVEL = 2;
 	/** Server-side VRAM budget in bytes (textures w*h*4 + canvas command capacity estimate). */
 	public static final long VRAM_BUDGET_BYTES = 16L * 1024 * 1024;
 	/** Budget estimate per canvas command slot (id + args worst case, serialized). */
@@ -1652,6 +1673,62 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 		return new Object[] { out };
 	}
 
+	/**
+	 * Version identity, as three independent numbers rather than one.
+	 *
+	 * The immediate reason a program needs this: it is the only way to tell OpenGPU v2 from the
+	 * legacy OCLights2 component, which shares neither this callback nor most of the surface. The
+	 * durable reason is feature detection — {@code api >= N} is the test, and it works for a
+	 * program written today running against a build shipped later.
+	 *
+	 * Answers nothing about the scene, so it deliberately takes no lock and does not
+	 * {@code requireScene()}: a program must be able to ask what it is talking to before it has
+	 * done anything, including on a GPU with no screen bound.
+	 */
+	@Callback(direct = true, doc = "function():table -- Version identity: {api = number, protocol = number, mod = string}. Branch on `api >= N` for feature detection; protocol is the client/server wire contract and mod is human-facing.")
+	public Object[] getVersion(Context context, Arguments args) throws Exception {
+		java.util.Map<String, Object> out = new java.util.LinkedHashMap<String, Object>();
+		out.put("api", Integer.valueOf(API_LEVEL));
+		out.put("protocol", Integer.valueOf(V2Wire.PROTOCOL_VERSION));
+		out.put("mod", Tags.MOD_VERSION);
+		return new Object[] { out };
+	}
+
+	/**
+	 * The caps a program must pace itself by — the structural bounds, not the live budget.
+	 *
+	 * Exists because the shipped Lua library was hardcoding two of these ({@code MAX_SUBMIT_BYTES}
+	 * and {@code MAX_TEXT_CHARS}), which is the duplicated-wire-constant hazard {@link #canvasOps}
+	 * was added to prevent. A library that guesses a cap is wrong the first time the cap moves,
+	 * and in the submit case it moved.
+	 *
+	 * {@code submitBytes} and {@code submitBytesPerTick} are separate keys although one is
+	 * currently a multiple of the other, and that is the whole point: collapsing them is exactly
+	 * the conflation that made any frame over 64 KiB undeliverable. A caller CHUNKS by the first
+	 * and PACES by the second, and those are different questions.
+	 *
+	 * The per-BATCH submit bound is deliberately absent. It is real and it is enforced, but a
+	 * program cannot observe batch boundaries and so cannot act on it; publishing a number whose
+	 * only possible use is to be misinterpreted is worse than withholding it. Live remaining
+	 * budget is {@link #getSubmitBudget}, which is a different thing again — this is what the
+	 * server will ever allow, that is what is left right now.
+	 *
+	 * Static constants only, so no lock and no scene required.
+	 */
+	@Callback(direct = true, doc = "function():table -- Structural caps, in bytes unless noted: submitBytes (per canvasSubmit call), submitBytesPerTick (per scene per tick), commandCap (commands per canvas), textChars (per drawText), writeBytes (per writeRegion call), writeBytesPerTick, textureDim (pixels), standingCommandBytes (whole scene). Chunk by submitBytes, pace by submitBytesPerTick.")
+	public Object[] getLimits(Context context, Arguments args) throws Exception {
+		java.util.Map<String, Object> out = new java.util.LinkedHashMap<String, Object>();
+		out.put("submitBytes", Integer.valueOf(V2Wire.MAX_SUBMIT_BYTES));
+		out.put("submitBytesPerTick", Integer.valueOf(V2Wire.MAX_SUBMIT_BYTES_PER_TICK));
+		out.put("commandCap", Integer.valueOf(CANVAS_COMMAND_CAP));
+		out.put("textChars", Integer.valueOf(V2Wire.MAX_TEXT_CHARS));
+		out.put("writeBytes", Integer.valueOf(V2Wire.MAX_WRITE_REGION_BYTES));
+		out.put("writeBytesPerTick", Integer.valueOf(V2Wire.MAX_WRITE_BYTES_PER_TICK));
+		out.put("textureDim", Integer.valueOf(V2Wire.MAX_TEXTURE_DIM));
+		out.put("standingCommandBytes", Integer.valueOf(V2Wire.MAX_STANDING_COMMAND_BYTES));
+		return new Object[] { out };
+	}
+
 	@Callback(direct = true, doc = "function():number -- This scene's incarnation epoch. Pass it to canvasSubmit to reject a handle from a previous scene.")
 	public Object[] getEpoch(Context context, Arguments args) throws Exception {
 		synchronized (sceneLock) {
@@ -1660,11 +1737,21 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 		}
 	}
 
-	@Callback(direct = true, doc = "function():number -- Bytes of canvasSubmit payload still allowed this tick.")
+	/**
+	 * Live remaining allowance, and the ceiling it is measured against.
+	 *
+	 * The ceiling rides along as a second return because the first number is meaningless without
+	 * it — "12000 left" says nothing until you know whether that is most of the allowance or the
+	 * dregs. Appended rather than substituted, so existing callers reading one value are
+	 * unaffected. The structural caps live on {@link #getLimits}; this is the only one that
+	 * MOVES, which is why it is a separate call and not a key in that table.
+	 */
+	@Callback(direct = true, doc = "function():number, number -- Bytes of canvasSubmit payload still allowed this tick, and the per-tick ceiling they are measured against.")
 	public Object[] getSubmitBudget(Context context, Arguments args) throws Exception {
 		synchronized (sceneLock) {
 			requireScene();
-			return new Object[] { scene.submitBudgetRemaining() };
+			return new Object[] { scene.submitBudgetRemaining(),
+					Integer.valueOf(V2Wire.MAX_SUBMIT_BYTES_PER_TICK) };
 		}
 	}
 

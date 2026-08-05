@@ -31,6 +31,14 @@ local function record(name)
       }
     elseif name == "getEpoch" then
       return 12345
+    elseif name == "getLimits" then
+      return {
+        submitBytes = 65536, submitBytesPerTick = 131072, commandCap = 4096,
+        textChars = 8192, writeBytes = 16384, writeBytesPerTick = 16384,
+        textureDim = 8192, standingCommandBytes = 2097152,
+      }
+    elseif name == "getVersion" then
+      return { api = 2, protocol = 3, mod = "0.0.0-stub" }
     elseif name == "clearNodes" then
       return 0
     elseif name == "canvasSubmit" then
@@ -43,12 +51,31 @@ local proxy = { address = "stub-address", type = "opengpu" }
 for _, m in ipairs({ "canvasOps", "getEpoch", "clearNodes", "createCanvas", "createCanvasNode",
                      "createSprite", "canvasSubmit", "setNodeTransform", "setNodeZ",
                      "setNodeVisible", "setNodeTint", "freeNode", "freeCanvas",
-                     "getSubmitBudget", "setColor", "fill", "clear", "drawText" }) do
+                     "getSubmitBudget", "setColor", "fill", "clear", "drawText",
+                     "getLimits", "getVersion" }) do
   proxy[m] = record(m)
 end
 
+-- A component that answers getLimits with a DIFFERENT per-call ceiling. The library must chunk
+-- by whatever the server says, not by a number compiled into the library -- that hardcoding is
+-- what this callback exists to remove, so a test that only ever sees the default value would
+-- pass just as happily against the bug.
+local tinyProxy = { address = "tiny-address", type = "opengpu" }
+for k, v in pairs(proxy) do tinyProxy[k] = v end
+tinyProxy.getLimits = setmetatable({}, { __call = function()
+  return { submitBytes = 1024, submitBytesPerTick = 2048, commandCap = 4096, textChars = 40 }
+end })
+
+-- A component predating both callbacks. Must still bind, on the shipped fallbacks.
+local oldProxy = { address = "old-address", type = "opengpu" }
+for k, v in pairs(proxy) do oldProxy[k] = v end
+oldProxy.getLimits = nil
+oldProxy.getVersion = nil
+
 package.loaded["component"] = setmetatable({ opengpu = proxy, proxy = function(a)
                                                  if a == "stub-address" then return proxy end
+                                                 if a == "tiny-address" then return tinyProxy end
+                                                 if a == "old-address" then return oldProxy end
                                                  return nil, "no such component"
                                                end },
                                            { __index = function() return nil end })
@@ -125,6 +152,40 @@ check(true, "free() is idempotent")
 
 check(not pcall(function() opengpu.bind("no-such-address") end),
       "bind() with a bad address raises instead of silently using the primary")
+
+-- ---- version and limits discovery ------------------------------------------
+
+local lim = gpu:limits()
+check(type(lim) == "table" and lim.submitBytes == 65536, "limits() reports the per-call ceiling")
+check(lim.submitBytesPerTick == 131072, "limits() reports the per-tick allowance")
+check(lim.submitBytes ~= lim.submitBytesPerTick,
+      "the two submit bounds stay DISTINCT -- collapsing them is the defect they encode")
+lim.submitBytes = 1
+check(gpu:limits().submitBytes == 65536, "limits() returns a copy, not the live table")
+
+local ver = gpu:version()
+check(type(ver) == "table" and ver.api == 2, "version() reports the api level")
+check(ver.protocol == 3 and ver.mod == "0.0.0-stub", "version() reports protocol and mod")
+ver.api = 99
+check(gpu:version().api == 2, "version() returns a copy, not the live table")
+
+-- The load-bearing one: chunking must follow the SERVER's ceiling.
+local tiny = opengpu.bind("tiny-address")
+check(tiny:limits().submitBytes == 1024, "a server-supplied ceiling overrides the fallback")
+local tc = tiny:canvas(64, 64)
+for i = 1, 40 do tc:setColor(i, i, i):fillRect(i, i, 2, 2) end
+local tbytes, tchunks = tc:pending()
+check(tchunks == math.max(1, math.ceil(tbytes / (1024 - 4))),
+      "chunk count follows the server ceiling, not a compiled-in 64 KiB", tbytes .. "B/" .. tchunks)
+check(tchunks > 1, "and that frame really does span more than one chunk", tchunks)
+check(not pcall(function() tc:text(0, 0, string.rep("x", 41)) end),
+      "a server-supplied textChars cap is enforced too")
+tc:discard()
+
+-- An older component must still work, on the fallbacks.
+local old = opengpu.bind("old-address")
+check(old:limits().submitBytes == 65536, "a component without getLimits falls back, not fails")
+check(old:version() == nil, "version() is nil rather than fabricated when unsupported")
 
 print(string.format("=== %d passed, %d failed ===", pass, fail))
 os.exit(fail == 0 and 0 or 1)
