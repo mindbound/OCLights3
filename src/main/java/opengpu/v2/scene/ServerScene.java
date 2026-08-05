@@ -327,6 +327,47 @@ public final class ServerScene {
 		applyAndStage(new Delta.NodeProps(nodeId, V2Wire.PROP_VISIBLE, new double[] { visible ? 1 : 0 }));
 	}
 
+	/**
+	 * Hide one node and show another as ONE indivisible pair — the double-buffer swap.
+	 *
+	 * This is the atomicity primitive for a frame too large to arrive in one call. The problem it
+	 * solves: a chunked publish is N independent direct callbacks, each taking and releasing
+	 * {@code sceneLock} on its own, while the seal runs on the server thread at tick END. Nothing
+	 * spans two chunks, so a seal can fall between them and ship a batch holding chunk 1's
+	 * destructive publish alone — every watcher then renders the partial frame. Widening a byte
+	 * budget cannot fix that, because batch membership is a timing property, not a size one.
+	 *
+	 * The construction, and why it is cheaper than the alternative: a program draws the whole
+	 * frame into a HIDDEN canvas node, across as many chunks, ticks and batches as it likes, and
+	 * then calls this. Content assembled where nothing is looking does not need to be atomic —
+	 * only the reveal does, and the reveal is two property deltas. Compare server-side frame
+	 * assembly, which was designed and rejected: it caps an atomic frame at what one batch carries,
+	 * has to charge bytes before anything is staged (which wedges {@link #sealBatch}'s counters,
+	 * since it returns early on an empty staged list without resetting them), and narrows what
+	 * {@code append} can express because the command-cap precheck is deliberately compaction-blind.
+	 * A back buffer is bounded by MAX_STANDING_COMMAND_BYTES instead — an order of magnitude more.
+	 *
+	 * ALL-OR-NOTHING, and provably so rather than by assertion. Both ids are validated before
+	 * either delta is staged, and {@link DeltaApplier}'s NodeProps path throws ONLY on a missing
+	 * node; every later step is unconditional field assignment. Since this runs single-threaded
+	 * under the caller's lock, nothing can remove a node between the two applies, so the second
+	 * cannot throw. {@code applyAndStage} has no rollback and nothing else here does either —
+	 * which is exactly why the validation has to come first.
+	 *
+	 * Hide is staged BEFORE show, so a mirror replaying the pair never has both visible, even
+	 * transiently. It never sees either state alone: SceneMirror.applyBatch applies every delta in
+	 * a batch before setting {@code dirty} once.
+	 */
+	public void swapVisibility(int hideNodeId, int showNodeId) {
+		if (hideNodeId == showNodeId)
+			throw new IllegalArgumentException(
+					"swapVisibility needs two different nodes, got " + hideNodeId + " twice");
+		requireNode(hideNodeId);
+		requireNode(showNodeId);
+		applyAndStage(new Delta.NodeProps(hideNodeId, V2Wire.PROP_VISIBLE, new double[] { 0 }));
+		applyAndStage(new Delta.NodeProps(showNodeId, V2Wire.PROP_VISIBLE, new double[] { 1 }));
+	}
+
 	public void setTint(int nodeId, int argb) {
 		requireNode(nodeId);
 		applyAndStage(new Delta.NodeProps(nodeId, V2Wire.PROP_TINT,

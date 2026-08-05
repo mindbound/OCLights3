@@ -1981,6 +1981,44 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 		return null;
 	}
 
+	/**
+	 * Reveal a composed frame: hide one node and show another, indivisibly.
+	 *
+	 * The problem it solves. A frame too large for one canvasSubmit arrives as several
+	 * independent direct calls, each taking and releasing {@link #sceneLock} on its own, while the
+	 * batch seals on the server thread at tick END. A seal can therefore land between two chunks
+	 * and ship a batch carrying only the first — a destructive publish — so every watcher renders
+	 * a half-drawn frame. That is a timing property and no byte allowance can remove it; the
+	 * 2026-08-04 cap split made it rare, not impossible.
+	 *
+	 * The remedy is not to make the frame atomic but to compose it where nothing is looking:
+	 * draw into a HIDDEN canvas node over as many calls, ticks and batches as it takes, then call
+	 * this. Only the reveal has to be indivisible, and a reveal is two property deltas.
+	 * {@code Canvas2dRenderer} skips invisible nodes, so the back buffer costs no client render
+	 * work while it fills and its intermediate states are never drawn.
+	 *
+	 * {@code limit} deliberately MATCHES setNodeVisible rather than halving it for the second
+	 * delta. A caller can always express this racily as two setNodeVisible calls; if the safe
+	 * path were the more rationed one, programs would route around it and take the tear back.
+	 *
+	 * Both ids are validated before either delta is staged — see
+	 * {@link opengpu.v2.scene.ServerScene#swapVisibility}, which is where the all-or-nothing
+	 * property is established and tested. Refusals here change nothing at all.
+	 */
+	@Callback(direct = true, limit = 256, doc = "function(hideNodeId:number, showNodeId:number) -- Atomically hide one node and show another, in one batch. Compose a frame into a hidden canvas node across as many canvasSubmit calls as it needs, then swap it in: the viewer never sees a partial frame. Refuses two equal ids.")
+	public Object[] swapVisibility(Context context, Arguments args) throws Exception {
+		int hideId = args.checkInteger(0);
+		int showId = args.checkInteger(1);
+		synchronized (sceneLock) {
+			requireScene();
+			requireNodeLocked(hideId);
+			requireNodeLocked(showId);
+			scene.swapVisibility(hideId, showId);
+			chunkDirty = true;
+		}
+		return null;
+	}
+
 	@Callback(direct = true, limit = 256, doc = "function(nodeId:number, r:number, g:number, b:number[, a:number]) -- Multiply a node's output by a colour (0-255 channels).")
 	public Object[] setNodeTint(Context context, Arguments args) throws Exception {
 		int id = args.checkInteger(0);

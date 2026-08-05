@@ -52,7 +52,7 @@ for _, m in ipairs({ "canvasOps", "getEpoch", "clearNodes", "createCanvas", "cre
                      "createSprite", "canvasSubmit", "setNodeTransform", "setNodeZ",
                      "setNodeVisible", "setNodeTint", "freeNode", "freeCanvas",
                      "getSubmitBudget", "setColor", "fill", "clear", "drawText",
-                     "getLimits", "getVersion" }) do
+                     "getLimits", "getVersion", "swapVisibility" }) do
   proxy[m] = record(m)
 end
 
@@ -181,6 +181,37 @@ check(tchunks > 1, "and that frame really does span more than one chunk", tchunk
 check(not pcall(function() tc:text(0, 0, string.rep("x", 41)) end),
       "a server-supplied textChars cap is enforced too")
 tc:discard()
+
+-- ---- the double-buffer swap ------------------------------------------------
+
+local front = gpu:show(gpu:canvas(32, 32))
+local back = gpu:show(gpu:canvas(32, 32))
+back:setVisible(false)
+
+local before = #calls
+check(front:swapWith(back) == back, "swapWith returns the node now on screen, so it chains")
+check(#calls == before + 1, "and it is ONE call, not two setVisible -- two could land in "
+      .. "different batches, which is a frame of both-hidden or both-shown",
+      (#calls - before) .. " calls")
+check(calls[#calls].name == "swapVisibility", "it calls swapVisibility")
+check(calls[#calls].args[1] == front.id and calls[#calls].args[2] == back.id,
+      "with hide-then-show argument order")
+
+check(not pcall(function() front:swapWith(front) end), "swapping a node with itself is refused")
+check(not pcall(function() front:swapWith(nil) end), "swapWith(nil) is refused")
+check(not pcall(function() front:swapWith({ id = 7 }) end),
+      "swapWith refuses a table that is not a node")
+
+local strayGpu = opengpu.bind("old-address")
+local stray = strayGpu:show(strayGpu:canvas(16, 16))
+check(not pcall(function() front:swapWith(stray) end),
+      "swapWith refuses a node belonging to a DIFFERENT gpu -- node ids are scene-scoped, so "
+      .. "the ids would collide silently and reveal the wrong node")
+stray:free()
+
+back:free()
+front:free()
+check(not pcall(function() front:swapWith(back) end), "a freed node cannot be swapped")
 
 -- An older component must still work, on the fallbacks.
 local old = opengpu.bind("old-address")

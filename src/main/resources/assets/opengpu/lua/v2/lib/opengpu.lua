@@ -328,6 +328,46 @@ function Node:setVisible(visible)
 end
 
 --[[
+  Hide this node and show `other`, indivisibly -- the double-buffer swap.
+
+  Why it exists. A frame too big for one submit is sent as several calls, and the server seals a
+  batch on a tick boundary that can fall BETWEEN them. Publish-then-append across that boundary
+  means watchers render the first chunk alone: a half-drawn frame. Widening the byte allowance
+  made that rare, not impossible, because batch membership is about timing rather than size.
+
+  So do not compose a frame where anyone can see it. Draw into a hidden node over as many calls
+  and ticks as it takes, then swap:
+
+      local front, back = gpu:show(a), gpu:show(b)
+      back:setVisible(false)
+      -- ... any number of back-buffer publishes, across any number of ticks ...
+      front:swapWith(back)      -- the viewer sees the old frame, then the new one. Never both,
+                                -- never half of either.
+
+  Two setVisible calls do NOT do this: they are separate deltas that can land in separate
+  batches, which is one frame of both-hidden or both-shown.
+
+  Refuses swapping a node with itself -- that would be hide-then-show on one node, a no-op that
+  still spends two deltas and would read as if it had worked.
+]]
+function Node:swapWith(other)
+  checkAlive(self, "swapWith")
+  if type(other) ~= "table" or other.kind == nil or other.id == nil then
+    error("swapWith needs another node, got " .. type(other), 2)
+  end
+  checkAlive(other, "swapWith")
+  if other.gpu ~= self.gpu then
+    error("swapWith needs two nodes on the SAME gpu; a node cannot be revealed by another "
+          .. "screen's scene", 2)
+  end
+  if other.id == self.id then
+    error("swapWith needs two different nodes", 2)
+  end
+  call("swapVisibility", self.gpu.raw.swapVisibility, self.id, other.id)
+  return other
+end
+
+--[[
   Tint multiplies the node's output -- but ONLY on sprite nodes.
 
   The renderer resets colour per node and reads the tint in the sprite path alone, so tinting a
