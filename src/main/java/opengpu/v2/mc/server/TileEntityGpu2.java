@@ -729,8 +729,14 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 			// RELEASES, not just forgetting. The old call cleared the router's map and emitted
 			// nothing, which left every machine holding the button exactly as it had been —
 			// the stuck press outlives the session that caused it, because it lives in Lua
-			// state that OC persists, not in the map. The disconnect event still carries the
-			// player object, and this is the last moment a checked signal can name them.
+			// state that OC persists, not in the map.
+			//
+			// This is NOT the last chance to emit, whatever an earlier version of this
+			// comment claimed. On an integrated server the disconnect is processed on the
+			// network thread and can land after the world save, so a release emitted here
+			// reaches a machine whose NBT is already written and dies with the process.
+			// V2ServerRuntime.onServerStopping covers that case from the server thread,
+			// before the save; this call is what covers a player leaving a running server.
 			flushWatcherLocked(watcherUuid, player);
 		}
 	}

@@ -240,8 +240,11 @@ public final class V2ServerRuntime {
 		String uuid = event.player.getUniqueID().toString();
 		for (TileEntityGpu2 te : hostsByScene.values()) {
 			// The player object is passed along because eviction now EMITS the pending
-			// releases rather than merely forgetting them, and a checked signal needs someone
-			// to check. This event is the last point at which they can still be named.
+			// releases rather than merely forgetting them, and a checked signal needs
+			// someone to check — this event is the last one that still carries them.
+			//
+			// It is not, however, the last point at which a release can be emitted, and on
+			// an integrated server it is not even early enough: see onServerStopping.
 			//
 			// Guarded PER HOST. Eviction used to be map bookkeeping that could not throw; it
 			// now reaches into the OC network, and one bad host must not stop every later host
@@ -253,6 +256,45 @@ public final class V2ServerRuntime {
 			}
 		}
 		reassembler.evict(uuid);
+	}
+
+	/**
+	 * Called from the mod's ServerStoppingEvent hook, BEFORE the world save: end every
+	 * gesture every player is still holding, so the releases are queued into the machines
+	 * while their NBT can still record them. OpenComputers persists the signal queue, so a
+	 * release queued here is delivered when the world loads again; one queued any later is
+	 * simply lost, and the program wakes up still believing the button is down.
+	 *
+	 * Deliberately unconditional — no distance, dimension or subscription test. Every one
+	 * of those exists to decide who should be *receiving* input, and at shutdown nobody is;
+	 * the only question left is who is owed a release. evictWatcher is a no-op for a player
+	 * holding nothing, so the cost of asking everyone is a map lookup each.
+	 *
+	 * NOT synchronized, and that is deliberate. evictWatcher takes a TE's sceneLock, while
+	 * onBlockDestroyed already takes sceneLock and then calls the synchronized store() —
+	 * so holding this monitor across evictWatcher would invert an existing lock order and
+	 * deadlock against any machine thread in that path. onPlayerLoggedOut walks the same
+	 * map unsynchronized for the same reason.
+	 */
+	public void onServerStopping() {
+		MinecraftServer server = MinecraftServer.getServer();
+		if (server == null) {
+			return;
+		}
+		@SuppressWarnings("unchecked")
+		List<EntityPlayerMP> players = server.getConfigurationManager().playerEntityList;
+		for (TileEntityGpu2 te : hostsByScene.values()) {
+			for (EntityPlayerMP player : players) {
+				// Guarded per host AND per player: this is the last chance any of these
+				// releases will ever get, so one host that throws must not cost the rest
+				// of them theirs.
+				try {
+					te.evictWatcher(player.getUniqueID().toString(), player);
+				} catch (RuntimeException e) {
+					OpenGPU.logger.warn("v2: flushing held gestures at shutdown failed", e);
+				}
+			}
+		}
 	}
 
 	/** Called from the mod's ServerStoppedEvent hook: flush the store, drop all state. */
