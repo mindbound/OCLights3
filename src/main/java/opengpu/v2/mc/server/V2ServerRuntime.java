@@ -239,7 +239,18 @@ public final class V2ServerRuntime {
 	public void onPlayerLoggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
 		String uuid = event.player.getUniqueID().toString();
 		for (TileEntityGpu2 te : hostsByScene.values()) {
-			te.evictWatcher(uuid);
+			// The player object is passed along because eviction now EMITS the pending
+			// releases rather than merely forgetting them, and a checked signal needs someone
+			// to check. This event is the last point at which they can still be named.
+			//
+			// Guarded PER HOST. Eviction used to be map bookkeeping that could not throw; it
+			// now reaches into the OC network, and one bad host must not stop every later host
+			// in this map from evicting the same departing player.
+			try {
+				te.evictWatcher(uuid, event.player);
+			} catch (RuntimeException e) {
+				OpenGPU.logger.warn("v2: evicting " + uuid + " from a scene failed", e);
+			}
 		}
 		reassembler.evict(uuid);
 	}
@@ -275,6 +286,12 @@ public final class V2ServerRuntime {
 			boolean subscribed = host.isSubscribed(uuid);
 			if (player.worldObj != te.getWorldObj() || player.dimension != te.getWorldObj().provider.dimensionId) {
 				if (subscribed) {
+					// Release before unsubscribing, while the player is still resolvable and
+					// the surface still reachable. Once unsubscribed, onInput's subscription
+					// gate rejects everything they send, so this is the last moment anything
+					// can end a gesture they are still holding — and a player who changed
+					// dimension mid-press is never sending a release themselves.
+					te.evictWatcher(uuid, player);
 					host.unsubscribe(uuid);
 				}
 				continue;
@@ -290,6 +307,12 @@ public final class V2ServerRuntime {
 			if (!subscribed && dist <= SUBSCRIBE_RANGE) {
 				host.subscribe(uuid);
 			} else if (subscribed && dist > UNSUBSCRIBE_RANGE) {
+				// Same as the dimension case above: this is the last point at which a held
+				// gesture can be ended. A comment on the reach gate used to credit "the
+				// subscription gate" with catching a player who leaves without releasing —
+				// which was false until this line existed, because unsubscribing merely made
+				// that gate start rejecting their events rather than ending anything.
+				te.evictWatcher(uuid, player);
 				host.unsubscribe(uuid);
 			}
 		}
@@ -310,7 +333,15 @@ public final class V2ServerRuntime {
 		}
 		String screenAddress = screen.node().address();
 		for (TileEntityGpu2 te : hostsByScene.values()) {
-			te.onScreenRemoved(screenAddress);
+			// Guarded per host for the same reason as the logout loop: this notification now
+			// emits pending releases through the OC network, and a throw from one host would
+			// leave every host after it still believing the screen exists.
+			try {
+				te.onScreenRemoved(screenAddress);
+			} catch (RuntimeException e) {
+				OpenGPU.logger.warn("v2: notifying a GPU of screen " + screenAddress
+						+ " removal failed", e);
+			}
 		}
 	}
 
@@ -338,7 +369,8 @@ public final class V2ServerRuntime {
 		return transferIdCounter++;
 	}
 
-	private static EntityPlayerMP findPlayer(String uuid) {
+	/** Package-private so the input router's release flush resolves watchers the same way. */
+	static EntityPlayerMP findPlayer(String uuid) {
 		MinecraftServer server = MinecraftServer.getServer();
 		if (server == null) {
 			return null;

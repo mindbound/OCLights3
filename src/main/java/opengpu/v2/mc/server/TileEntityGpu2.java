@@ -302,6 +302,31 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 	}
 
 	private void onUnload() {
+		// BEFORE node.remove(), because the flush resolves the target surface through this
+		// node's network and there is no network left afterwards. Same ordering trick
+		// BlockScreen2.breakBlock uses deliberately, and the reason the screen's own
+		// onChunkUnload cannot be fixed without the same inversion there.
+		//
+		// This is the GPU going away while the SCREEN may well survive — a broken GPU, an
+		// unloading GPU chunk next to a loaded screen. Without it, every gesture held on that
+		// still-live screen is stranded with no later event able to end it: the router dies
+		// with this tile entity, so even a subsequent release has nothing left to match.
+		// GUARDED, for the reason V2ServerRuntime states twice for its own loops: this used to be
+		// map bookkeeping that could not throw and now reaches into the OC network, where any
+		// third-party component's onMessage can raise. Here the cost of an escape is worse than
+		// a skipped flush — the two statements below are node.remove() and unregister(), so a
+		// throw would leave a ghost node on the network and an invalid TE ticking in
+		// hostsByScene for the rest of the session.
+		if (node != null && node.network() != null) {
+			try {
+				synchronized (sceneLock) {
+					int[] res = scene != null ? resolutionLocked() : new int[] { 0, 0 };
+					inputRouter.flushAll(node, PLAYER_LOOKUP, res[0], res[1]);
+				}
+			} catch (RuntimeException e) {
+				OpenGPU.logger.warn("v2: releasing held pointers during GPU unload failed", e);
+			}
+		}
 		if (node != null) {
 			node.remove();
 		}
@@ -434,6 +459,12 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 			}
 			OpenGPU.logger.info("GPU " + node.address() + ": screen " + boundScreenAddress
 					+ " joined a wall; following it to origin " + originTile.node().address());
+			// The binding MOVES here without any surface being destroyed, which is why
+			// releaseBoundScreenLocked never sees it. Flush BEFORE the reassignment, while
+			// boundScreenAddress is still the address the held gestures were recorded against
+			// — afterwards there is nothing left pointing at the old surface, so the flush
+			// would match no slots and the gestures would strand silently.
+			flushBoundScreenLocked();
 			boundScreenAddress = originTile.node().address();
 			screen = originTile;
 			boundScreen = screen;
@@ -452,6 +483,16 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 			// claim locally; never clearScene(), that would tear down the real owner's.
 			OpenGPU.logger.info("GPU " + node.address() + ": screen " + boundScreenAddress
 					+ " is now driven by " + driver + "; dropping the stale binding");
+			// Release before dropping the claim, exactly as the wall-follow branch does. A
+			// review argued this branch could never run with gestures held — that another GPU
+			// can only take the screen if OUR node is off the network, which would mean this TE
+			// had already unloaded and taken its router with it. A network PARTITION defeats
+			// that: cut the cable and we stay alive holding slots while, on the far side,
+			// screenIsAvailable sees no claim and lets another GPU bind. Repair the cable and
+			// we arrive here with a live router. The screen is reachable at this instant — the
+			// condition above just resolved its driver through the network — so the release
+			// goes out.
+			flushBoundScreenLocked();
 			boundScreen = null;
 			boundScreenAddress = null;
 			chunkDirty = true;
@@ -507,12 +548,83 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 	 * through it silently leaks the lock exactly when the screen is not loaded, leaving a
 	 * screen no GPU can ever claim.
 	 */
+	/**
+	 * Losing a surface by BINDING: {@code bind} (with the new screen), {@code unbind} (with
+	 * null) and teardown pass through here.
+	 *
+	 * NOT the only way a gesture stops being completable, and an earlier version of this
+	 * javadoc claimed it was — which is how the wall-follow transition went unhandled. The
+	 * binding can also MOVE without any surface being lost ({@code resolveScreenLocked}), the
+	 * screen can be removed under it ({@code onScreenRemoved}), this GPU can go away
+	 * ({@code onUnload}), a gate in {@code onInput} can reject the release, and the runtime can
+	 * unsubscribe a watcher who has walked away or changed dimension
+	 * ({@code V2ServerRuntime.applyProximityPolicy}).
+	 *
+	 * To find every site rather than trusting this list, grep {@code InputRouter} for the four
+	 * entry points — {@code flushScreen}, {@code flushWatcher}, {@code flushPointer},
+	 * {@code flushAll} — and read their callers. A previous version told the reader to grep two
+	 * helper names, which found five of the eight sites and read as if it had found all of them.
+	 *
+	 * Any pointer still held on the outgoing screen is RELEASED here, by emitting the
+	 * monitor_up the client can no longer cause. That matters most for the case a program
+	 * creates itself: a {@code monitor_down} handler that calls {@code unbind()} — an exit
+	 * button — or {@code bind(other)} — a display cycler. Those callbacks are deliberately NOT
+	 * direct, so they run on the server thread serialized with onInput, which makes the
+	 * matching release arrive after the transition EVERY time rather than as a race. It would
+	 * then be dropped by onInput's screen gate, and the program would wait forever for a
+	 * button it told the server to disconnect.
+	 *
+	 * Flushed BEFORE clearScene, while the old node is still attached and can carry a signal.
+	 */
 	private void releaseBoundScreenLocked(TileEntityScreen2 except) {
+		// Flushed by ADDRESS, and before resolving the tile — the gestures to end are the ones
+		// recorded against boundScreenAddress, which is known even when the screen's chunk is
+		// unloaded and screenAtLocked() therefore returns null. Gating the flush on resolving a
+		// live TE meant an unbind while the screen was out of the world skipped it entirely.
+		//
+		// But ONLY when the surface actually changes. `except` is what bind() passes so that an
+		// idempotent re-bind is not a teardown, and screenIsAvailable deliberately permits
+		// re-binding the screen this GPU already drives. Flushing regardless made
+		// `gpu.bind(gpu.getScreen())` — an ordinary line in an init routine — end a drag the
+		// player was in the middle of, after which their moves hit an empty slot and were
+		// dropped. Nothing is being lost in that case, so nothing needs releasing.
+		String keepAddress = except != null && except.node() != null
+				? except.node().address() : null;
+		if (keepAddress == null || !keepAddress.equals(boundScreenAddress)) {
+			flushBoundScreenLocked();
+		}
 		TileEntityScreen2 old = boundScreen != null ? boundScreen : screenAtLocked(boundScreenAddress);
 		if (old != null && old != except) {
 			old.clearScene(node != null ? node.address() : null);
 		}
 	}
+
+	/**
+	 * End every gesture held on the currently bound surface.
+	 *
+	 * Separate from releaseBoundScreenLocked because losing a surface is NOT the only way to
+	 * strand a gesture — the binding can also MOVE under one. This is called from every such
+	 * transition; see each call site for which.
+	 */
+	private void flushBoundScreenLocked() {
+		if (boundScreenAddress == null || node == null) {
+			return;
+		}
+		int[] res = resolutionLocked();
+		inputRouter.flushScreen(boundScreenAddress, node, PLAYER_LOOKUP, res[0], res[1]);
+	}
+
+	/**
+	 * Resolves a watcher key back to its player so a server-originated release can still be a
+	 * CHECKED signal. Shared rather than per-call: the lookup is the runtime's, and routing it
+	 * through the same path the inbound edge uses keeps one answer to "who is this watcher".
+	 */
+	private static final InputRouter.PlayerLookup PLAYER_LOOKUP = new InputRouter.PlayerLookup() {
+		@Override
+		public net.minecraft.entity.player.EntityPlayer find(String watcherKey) {
+			return V2ServerRuntime.findPlayer(watcherKey);
+		}
+	};
 
 	/**
 	 * A screen is bindable when nothing drives it, we already drive it, or its recorded
@@ -554,6 +666,15 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 	 */
 	public void onScreenRemoved(String screenAddress) {
 		synchronized (sceneLock) {
+			// Release before forgetting the binding, and before the block finishes breaking:
+			// BlockScreen2.breakBlock notifies the runtime BEFORE super.breakBlock, so the
+			// screen TE is still valid here and its node still on the network. That ordering
+			// is what makes the signal deliverable at all, and it is the reason this call sits
+			// here rather than in invalidate().
+			if (node != null) {
+				int[] res = scene != null ? resolutionLocked() : new int[] { 0, 0 };
+				inputRouter.flushScreen(screenAddress, node, PLAYER_LOOKUP, res[0], res[1]);
+			}
 			if (screenAddress != null && screenAddress.equals(boundScreenAddress)) {
 				boundScreen = null;
 				boundScreenAddress = null;
@@ -600,12 +721,17 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 		}
 	}
 
-	public void evictWatcher(String watcherUuid) {
+	public void evictWatcher(String watcherUuid, EntityPlayer player) {
 		synchronized (sceneLock) {
 			if (host != null) {
 				host.evictWatcher(watcherUuid);
 			}
-			inputRouter.evictWatcher(watcherUuid);
+			// RELEASES, not just forgetting. The old call cleared the router's map and emitted
+			// nothing, which left every machine holding the button exactly as it had been —
+			// the stuck press outlives the session that caused it, because it lives in Lua
+			// state that OC persists, not in the map. The disconnect event still carries the
+			// player object, and this is the last moment a checked signal can name them.
+			flushWatcherLocked(watcherUuid, player);
 		}
 	}
 
@@ -619,11 +745,27 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 			if (scene == null || host == null) {
 				return;
 			}
+			// The gates below RELEASE any pointer this watcher holds rather than merely
+			// dropping the event. Dropping is how the original defect worked: a POINTER_UP
+			// swallowed by a gate leaves Lua waiting on a button forever, and no amount of
+			// server-side tidying reaches that state — only a signal does.
+			//
+			// This is not the same as exempting a gate, which an earlier review rightly
+			// refused: the client's coordinates are discarded and the release carries
+			// Pointer.x/y, which the server accepted at press time. A disqualified sender
+			// cannot choose where the click lands, and still gets no event through.
+			//
+			// POINTERS ONLY. Held KEYS are not released, because the key path keeps no state to
+			// release from — route() emits monitor_key_down and tracks nothing, so the server
+			// does not know a key is down. That is a real gap and it predates this code; it is
+			// recorded in ROADMAP rather than half-addressed here.
 			if (!host.isSubscribed(watcherUuid) || input.epoch != scene.epoch()) {
+				flushWatcherLocked(watcherUuid, player);
 				return;
 			}
 			TileEntityScreen2 screen = boundScreen;
 			if (screen == null || screen.isInvalid()) {
+				flushWatcherLocked(watcherUuid, player);
 				return; // no surface: nothing for the signal's address to be
 			}
 			// REACH CHECK, separate from the render subscription. Subscription answers "who
@@ -634,11 +776,43 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 			// isUseableByPlayer (8 blocks) before it sends anything, and canInteract is NOT
 			// a substitute — it returns true for everyone until a machine has explicit users.
 			if (!withinReach(player, screen)) {
+				// Only a RELEASE ends a gesture here, and only THAT BUTTON'S. This gate fires
+				// per event, so ending on any rejected event would kill a live drag the instant
+				// a player crossed the boundary — jitter at exactly 8 blocks, a shove, one step
+				// back. A release is the one event meaning that gesture is over, and it is
+				// precisely the one the original defect swallowed: press, get moved out of
+				// reach by a walk, teleport, knockback or portal, release into nothing.
+				//
+				// Scoped to input.c because slots are per button and two-button drags are
+				// ordinary: releasing the right button must not end the left one, which is
+				// still held. Ending the whole watcher here would have re-created the very
+				// dead-drag this narrowing exists to prevent, just triggered by a release.
+				//
+				// A player who leaves and never releases is caught by the UNSUBSCRIBE path in
+				// V2ServerRuntime.applyProximityPolicy, which releases before it unsubscribes.
+				// Note it is that call and not the subscription GATE here: a gate can only
+				// reject what a client sends, and a silent client sends nothing. An earlier
+				// version of this comment credited the gate, which was false until the flush at
+				// the unsubscribe site existed.
+				if (input.kind == MessageCodec.INPUT_POINTER_UP && node != null
+						&& input.c >= 0 && input.c <= 2) {
+					int[] r = scene != null ? resolutionLocked() : new int[] { 0, 0 };
+					inputRouter.flushPointer(watcherUuid, input.c, player, node, r[0], r[1]);
+				}
 				return;
 			}
 			int[] res = resolutionLocked();
 			inputRouter.route(input, watcherUuid, player, screen, res[0], res[1]);
 		}
+	}
+
+	/** End every gesture this watcher holds, wherever it holds them. Caller holds sceneLock. */
+	private void flushWatcherLocked(String watcherUuid, EntityPlayer player) {
+		if (node == null) {
+			return;
+		}
+		int[] res = scene != null ? resolutionLocked() : new int[] { 0, 0 };
+		inputRouter.flushWatcher(watcherUuid, player, node, res[0], res[1]);
 	}
 
 	/** Vanilla's interaction distance, squared — the same bound OC uses for screen input. */
