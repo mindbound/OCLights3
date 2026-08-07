@@ -14,7 +14,6 @@ import cpw.mods.fml.common.event.FMLMissingMappingsEvent;
 import cpw.mods.fml.common.event.FMLPostInitializationEvent;
 import cpw.mods.fml.common.event.FMLPreInitializationEvent;
 import cpw.mods.fml.common.event.FMLServerStoppedEvent;
-import cpw.mods.fml.common.event.FMLServerStoppingEvent;
 import cpw.mods.fml.common.network.NetworkRegistry;
 import opengpu.v2.mc.net.V2Net;
 import opengpu.v2.mc.server.V2ServerRuntime;
@@ -105,22 +104,6 @@ public class OpenGPU {
 		proxy.initV2Client();
 
 		logger.log(Level.INFO, "STANDING BY");
-	}
-
-	/**
-	 * STOPPING, not STOPPED: this is the last hook that runs while the machines are still
-	 * alive and the world is still unsaved, so it is the only one at which an emitted
-	 * release can still reach a computer AND be written to disk with it.
-	 *
-	 * PlayerLoggedOutEvent does not cover this. On an integrated server the client's
-	 * disconnect is processed on the network thread and races the world save — a release
-	 * emitted there can land after the machine's NBT has already been written, which is
-	 * exactly how a held gesture survived a quit-and-rejoin in testing. OpenComputers
-	 * itself only hooks ServerStopped, so at this point no machine has been torn down yet.
-	 */
-	@Mod.EventHandler
-	public void serverStopping(FMLServerStoppingEvent event) {
-		V2ServerRuntime.get().onServerStopping();
 	}
 
 	@Mod.EventHandler

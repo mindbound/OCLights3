@@ -130,6 +130,21 @@ public final class V2ServerRuntime {
 	}
 
 	/**
+	 * A copy of the live hosts, taken under the monitor that {@link #register} and
+	 * {@link #unregister} hold.
+	 *
+	 * Both callers run on the server thread today, but what they call into does not stay in
+	 * this class: eviction and screen-removal reach the OC network, and a callee that
+	 * unregisters a host mid-iteration turns a raw values() walk into a
+	 * ConcurrentModificationException. Copy under the monitor, iterate outside it: holding
+	 * this monitor across a call that takes a TE's sceneLock would invert the lock order
+	 * onBlockDestroyed establishes (sceneLock, then the synchronized store()).
+	 */
+	private synchronized java.util.List<TileEntityGpu2> hostsSnapshot() {
+		return new java.util.ArrayList<TileEntityGpu2>(hostsByScene.values());
+	}
+
+	/**
 	 * Scene ids with a live host, for the debug overlay.
 	 *
 	 * A copy taken under the monitor that {@link #register}/{@link #unregister} also hold. Both
@@ -158,8 +173,19 @@ public final class V2ServerRuntime {
 		if (event.phase == TickEvent.Phase.START) {
 			// Grant write allowances BEFORE machines run this tick, so an OC synchronized
 			// replay (a call that burned its budget last tick) always finds a fresh budget.
+			//
+			// Guarded per host, like this file's other loops, and with a sharper reason
+			// since serverBeginTick took on release delivery: the emission fans out through
+			// third-party onMessage handlers, and an escaping throw HERE — with the record
+			// persisted in the chunk — would crash the server on every subsequent load of
+			// the world. emitRelease catches its own sends; this is the backstop for
+			// everything else a host's begin-tick can reach.
 			for (TileEntityGpu2 te : new ArrayList<TileEntityGpu2>(hostsByScene.values())) {
-				te.serverBeginTick(tickCounter + 1, V2Wire.MAX_WRITE_BYTES_PER_TICK);
+				try {
+					te.serverBeginTick(tickCounter + 1, V2Wire.MAX_WRITE_BYTES_PER_TICK);
+				} catch (RuntimeException e) {
+					OpenGPU.logger.warn("v2: begin-tick failed for GPU scene " + te.sceneId(), e);
+				}
 			}
 			return;
 		}
@@ -238,63 +264,25 @@ public final class V2ServerRuntime {
 	@SubscribeEvent
 	public void onPlayerLoggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
 		String uuid = event.player.getUniqueID().toString();
-		for (TileEntityGpu2 te : hostsByScene.values()) {
-			// The player object is passed along because eviction now EMITS the pending
-			// releases rather than merely forgetting them, and a checked signal needs
-			// someone to check — this event is the last one that still carries them.
+		for (TileEntityGpu2 te : hostsSnapshot()) {
+			// No player object passed, deliberately: eviction no longer emits anything, it
+			// moves the departing player's gestures to pending records. Two designs that
+			// emitted here — checked signals need a live player, and this event is the last
+			// one that carries them — both lost the quit-to-title case, because this fires
+			// from networkTick inside the final tick-loop iteration and the queued signal
+			// died in OC's resume. The records are instead delivered at the next tick's
+			// START phase as unchecked computer.signal, or persisted by writeToNBT if that
+			// tick never comes. See docs/dev/INPUT-GESTURE-PERSISTENCE.md.
 			//
-			// It is not, however, the last point at which a release can be emitted, and on
-			// an integrated server it is not even early enough: see onServerStopping.
-			//
-			// Guarded PER HOST. Eviction used to be map bookkeeping that could not throw; it
-			// now reaches into the OC network, and one bad host must not stop every later host
-			// in this map from evicting the same departing player.
+			// Still guarded per host: eviction reaches the SceneHost, and one bad host must
+			// not stop every later host from evicting the same departing player.
 			try {
-				te.evictWatcher(uuid, event.player);
+				te.evictWatcher(uuid);
 			} catch (RuntimeException e) {
 				OpenGPU.logger.warn("v2: evicting " + uuid + " from a scene failed", e);
 			}
 		}
 		reassembler.evict(uuid);
-	}
-
-	/**
-	 * Called from the mod's ServerStoppingEvent hook, BEFORE the world save: end every
-	 * gesture every player is still holding, so the releases are queued into the machines
-	 * while their NBT can still record them. OpenComputers persists the signal queue, so a
-	 * release queued here is delivered when the world loads again; one queued any later is
-	 * simply lost, and the program wakes up still believing the button is down.
-	 *
-	 * Deliberately unconditional — no distance, dimension or subscription test. Every one
-	 * of those exists to decide who should be *receiving* input, and at shutdown nobody is;
-	 * the only question left is who is owed a release. evictWatcher is a no-op for a player
-	 * holding nothing, so the cost of asking everyone is a map lookup each.
-	 *
-	 * NOT synchronized, and that is deliberate. evictWatcher takes a TE's sceneLock, while
-	 * onBlockDestroyed already takes sceneLock and then calls the synchronized store() —
-	 * so holding this monitor across evictWatcher would invert an existing lock order and
-	 * deadlock against any machine thread in that path. onPlayerLoggedOut walks the same
-	 * map unsynchronized for the same reason.
-	 */
-	public void onServerStopping() {
-		MinecraftServer server = MinecraftServer.getServer();
-		if (server == null) {
-			return;
-		}
-		@SuppressWarnings("unchecked")
-		List<EntityPlayerMP> players = server.getConfigurationManager().playerEntityList;
-		for (TileEntityGpu2 te : hostsByScene.values()) {
-			for (EntityPlayerMP player : players) {
-				// Guarded per host AND per player: this is the last chance any of these
-				// releases will ever get, so one host that throws must not cost the rest
-				// of them theirs.
-				try {
-					te.evictWatcher(player.getUniqueID().toString(), player);
-				} catch (RuntimeException e) {
-					OpenGPU.logger.warn("v2: flushing held gestures at shutdown failed", e);
-				}
-			}
-		}
 	}
 
 	/** Called from the mod's ServerStoppedEvent hook: flush the store, drop all state. */
@@ -328,12 +316,12 @@ public final class V2ServerRuntime {
 			boolean subscribed = host.isSubscribed(uuid);
 			if (player.worldObj != te.getWorldObj() || player.dimension != te.getWorldObj().provider.dimensionId) {
 				if (subscribed) {
-					// Release before unsubscribing, while the player is still resolvable and
-					// the surface still reachable. Once unsubscribed, onInput's subscription
-					// gate rejects everything they send, so this is the last moment anything
-					// can end a gesture they are still holding — and a player who changed
-					// dimension mid-press is never sending a release themselves.
-					te.evictWatcher(uuid, player);
+					// Release before unsubscribing. Once unsubscribed, onInput's subscription
+					// gate rejects everything they send, so nothing client-side can end a
+					// gesture they are still holding — and a player who changed dimension
+					// mid-press is never sending a release themselves. The eviction moves the
+					// gestures to pending; the next tick's START phase delivers them.
+					te.evictWatcher(uuid);
 					host.unsubscribe(uuid);
 				}
 				continue;
@@ -349,12 +337,12 @@ public final class V2ServerRuntime {
 			if (!subscribed && dist <= SUBSCRIBE_RANGE) {
 				host.subscribe(uuid);
 			} else if (subscribed && dist > UNSUBSCRIBE_RANGE) {
-				// Same as the dimension case above: this is the last point at which a held
-				// gesture can be ended. A comment on the reach gate used to credit "the
-				// subscription gate" with catching a player who leaves without releasing —
-				// which was false until this line existed, because unsubscribing merely made
-				// that gate start rejecting their events rather than ending anything.
-				te.evictWatcher(uuid, player);
+				// Same as the dimension case above. A comment on the reach gate used to
+				// credit "the subscription gate" with catching a player who leaves without
+				// releasing — which was false until this line existed, because unsubscribing
+				// merely made that gate start rejecting their events rather than ending
+				// anything.
+				te.evictWatcher(uuid);
 				host.unsubscribe(uuid);
 			}
 		}
@@ -374,7 +362,7 @@ public final class V2ServerRuntime {
 			return;
 		}
 		String screenAddress = screen.node().address();
-		for (TileEntityGpu2 te : hostsByScene.values()) {
+		for (TileEntityGpu2 te : hostsSnapshot()) {
 			// Guarded per host for the same reason as the logout loop: this notification now
 			// emits pending releases through the OC network, and a throw from one host would
 			// leave every host after it still believing the screen exists.

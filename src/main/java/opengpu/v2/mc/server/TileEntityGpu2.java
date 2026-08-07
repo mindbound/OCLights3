@@ -16,6 +16,7 @@ import li.cil.oc.api.network.Node;
 import li.cil.oc.api.network.Visibility;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.nbt.NBTTagCompound;
+import net.minecraft.nbt.NBTTagList;
 import net.minecraft.network.NetworkManager;
 import net.minecraft.network.Packet;
 import net.minecraft.network.play.server.S35PacketUpdateTileEntity;
@@ -311,21 +312,17 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 		// unloading GPU chunk next to a loaded screen. Without it, every gesture held on that
 		// still-live screen is stranded with no later event able to end it: the router dies
 		// with this tile entity, so even a subsequent release has nothing left to match.
-		// GUARDED, for the reason V2ServerRuntime states twice for its own loops: this used to be
-		// map bookkeeping that could not throw and now reaches into the OC network, where any
-		// third-party component's onMessage can raise. Here the cost of an escape is worse than
-		// a skipped flush — the two statements below are node.remove() and unregister(), so a
-		// throw would leave a ghost node on the network and an invalid TE ticking in
-		// hostsByScene for the rest of the session.
-		if (node != null && node.network() != null) {
-			try {
-				synchronized (sceneLock) {
-					int[] res = scene != null ? resolutionLocked() : new int[] { 0, 0 };
-					inputRouter.flushAll(node, PLAYER_LOOKUP, res[0], res[1]);
-				}
-			} catch (RuntimeException e) {
-				OpenGPU.logger.warn("v2: releasing held pointers during GPU unload failed", e);
-			}
+		// NOTHING IS EMITTED HERE, and correctness deliberately does NOT depend on whether
+		// this hook runs before or after the chunk's unload save — 1.7.10's ordering there
+		// is contested, and this file is done betting on tick-order trivia. If the save
+		// runs after, these moved records ride its writeToNBT; if it ran first, it already
+		// persisted the same gestures, because snapshotForSave folds live activePointer
+		// entries into the record list precisely so no save can miss them. Either way the
+		// records reach disk exactly once and are delivered when the chunk returns.
+		// Emitting here as well (as a previous design did) was the double-delivery. A map
+		// move also cannot throw, which retires the try/catch the emitting version needed.
+		synchronized (sceneLock) {
+			inputRouter.flushAll();
 		}
 		if (node != null) {
 			node.remove();
@@ -344,6 +341,17 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 			// Hand the screen back before this GPU disappears, so it is immediately
 			// bindable by another one and stops advertising a scene that is being deleted.
 			releaseBoundScreenLocked(null);
+			// SYNCHRONOUS delivery, one of exactly two such sites (the other is screen
+			// removal). The pending list dies with this TE and its block has no NBT to
+			// come back through, so "deliver at next tick's START" would deliver never.
+			// The world demonstrably continues — a player just broke a block — so a signal
+			// emitted now is consumed on the next tick; the only way it is not is a crash,
+			// which loses in-flight state of every kind, not just ours.
+			inputRouter.flushAll();
+			if (node != null) {
+				int[] res = scene != null ? resolutionLocked() : new int[] { 0, 0 };
+				inputRouter.flushPendingLastChance(node, res[0], res[1]);
+			}
 			boundScreen = null;
 			boundScreenAddress = null;
 			if (host != null) {
@@ -379,6 +387,27 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 			if (scene != null) {
 				scene.beginTick(tick, writeBudget);
 			}
+			// THE delivery point for stranded-gesture releases, and it must be START phase.
+			// A signal emitted here is normally consumed by the machines' timeslice later
+			// in this same tick — before any point at which this tick can save the world —
+			// so removing a record on send does not race a save. Both previous designs
+			// emitted at END phase or at the transition itself, and both lost the
+			// quit-to-title case to the same mechanism: the signal sat queued across the
+			// shutdown save and OC's resume destroyed it. Records created during this tick
+			// (transitions run after START) wait one tick; records that never see another
+			// START ride writeToNBT instead, which is the entire point.
+			//
+			// "Normally", not "always": emitRelease refuses to send while any reachable
+			// machine is paused (OC's startup delay after a load, a neighbouring save's
+			// pause), which closes the systematic windows where a queued signal could sit
+			// across a save. What remains is an executor too starved to pop its queue
+			// within its own tick, or a machine chunk unloading in the very tick of
+			// delivery — crash-class residuals, documented in the design doc.
+			if (inputRouter.pendingReleaseCount() > 0 && node != null) {
+				int[] res = scene != null ? resolutionLocked() : new int[] { 0, 0 };
+				long now = worldObj != null ? worldObj.getTotalWorldTime() : 0L;
+				inputRouter.flushPending(node, res[0], res[1], now);
+			}
 		}
 	}
 
@@ -388,10 +417,23 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 		// resize after one would compare against a stale clock.
 		serverTick = tick;
 		synchronized (sceneLock) {
+			// All three of these run BEFORE the early return. Held-gesture records outlive
+			// the scene — they are restored from NBT before one exists, and a GPU with no
+			// scene still owes releases from the previous session. Gating them on `scene`
+			// would mean the dirty flag never reached markDirty. (Delivery and expiry
+			// themselves live in serverBeginTick, which is likewise not scene-gated.)
+			inputRouter.setWorldTime(worldObj != null ? worldObj.getTotalWorldTime() : 0L);
+			inputRouter.beginTick(tick);
+			if (inputRouter.consumePersistenceDirty()) {
+				// Gesture state is persisted now, so a chunk that is never marked modified
+				// is never written: without this a press could fail to reach disk, and the
+				// removal of a delivered record could fail to reach disk too — replaying
+				// that release on every subsequent load.
+				markDirty();
+			}
 			if (scene == null || host == null) {
 				return;
 			}
-			inputRouter.beginTick(tick);
 			flushRecordingLocked();
 			if (chunkDirty) {
 				chunkDirty = false;
@@ -607,24 +649,11 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 	 * transition; see each call site for which.
 	 */
 	private void flushBoundScreenLocked() {
-		if (boundScreenAddress == null || node == null) {
+		if (boundScreenAddress == null) {
 			return;
 		}
-		int[] res = resolutionLocked();
-		inputRouter.flushScreen(boundScreenAddress, node, PLAYER_LOOKUP, res[0], res[1]);
+		inputRouter.flushScreen(boundScreenAddress);
 	}
-
-	/**
-	 * Resolves a watcher key back to its player so a server-originated release can still be a
-	 * CHECKED signal. Shared rather than per-call: the lookup is the runtime's, and routing it
-	 * through the same path the inbound edge uses keeps one answer to "who is this watcher".
-	 */
-	private static final InputRouter.PlayerLookup PLAYER_LOOKUP = new InputRouter.PlayerLookup() {
-		@Override
-		public net.minecraft.entity.player.EntityPlayer find(String watcherKey) {
-			return V2ServerRuntime.findPlayer(watcherKey);
-		}
-	};
 
 	/**
 	 * A screen is bindable when nothing drives it, we already drive it, or its recorded
@@ -666,14 +695,20 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 	 */
 	public void onScreenRemoved(String screenAddress) {
 		synchronized (sceneLock) {
-			// Release before forgetting the binding, and before the block finishes breaking:
-			// BlockScreen2.breakBlock notifies the runtime BEFORE super.breakBlock, so the
-			// screen TE is still valid here and its node still on the network. That ordering
-			// is what makes the signal deliverable at all, and it is the reason this call sits
-			// here rather than in invalidate().
+			// SYNCHRONOUS delivery, one of exactly two such sites (the other is GPU block
+			// destruction). The screen's node address dies with the block and a re-placed
+			// screen gets a fresh one, so a record parked for the delivery loop would wait
+			// on an address that can never resolve again — until expiry, with the program
+			// holding the button the whole time. Emitting NOW works precisely because
+			// BlockScreen2.breakBlock notifies the runtime BEFORE super.breakBlock: the
+			// screen TE is still valid and its node still on the network. That ordering is
+			// why this call sits here rather than in invalidate().
 			if (node != null) {
+				inputRouter.flushScreen(screenAddress);
+				// Scoped to the dying address: force-delivering the WHOLE pending list
+				// mid-tick would strip unrelated records of the START-phase guarantee.
 				int[] res = scene != null ? resolutionLocked() : new int[] { 0, 0 };
-				inputRouter.flushScreen(screenAddress, node, PLAYER_LOOKUP, res[0], res[1]);
+				inputRouter.flushPendingFor(screenAddress, node, res[0], res[1]);
 			}
 			if (screenAddress != null && screenAddress.equals(boundScreenAddress)) {
 				boundScreen = null;
@@ -721,23 +756,24 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 		}
 	}
 
-	public void evictWatcher(String watcherUuid, EntityPlayer player) {
+	public void evictWatcher(String watcherUuid) {
 		synchronized (sceneLock) {
 			if (host != null) {
 				host.evictWatcher(watcherUuid);
 			}
-			// RELEASES, not just forgetting. The old call cleared the router's map and emitted
-			// nothing, which left every machine holding the button exactly as it had been —
-			// the stuck press outlives the session that caused it, because it lives in Lua
-			// state that OC persists, not in the map.
+			// RELEASES, not just forgetting. An early version cleared the router's map and
+			// emitted nothing, which left every machine holding the button exactly as it had
+			// been — the stuck press outlives the session that caused it, because it lives
+			// in Lua state that OC persists, not in the map.
 			//
-			// This is NOT the last chance to emit, whatever an earlier version of this
-			// comment claimed. On an integrated server the disconnect is processed on the
-			// network thread and can land after the world save, so a release emitted here
-			// reaches a machine whose NBT is already written and dies with the process.
-			// V2ServerRuntime.onServerStopping covers that case from the server thread,
-			// before the save; this call is what covers a player leaving a running server.
-			flushWatcherLocked(watcherUuid, player);
+			// No player parameter, and no emission here, and both absences carry the lesson
+			// of two failed designs. Emitting at this transition raced the shutdown save —
+			// quit-to-title is logged out from networkTick inside the final tick-loop
+			// iteration, so the queued signal died in OC's resume. The gestures instead
+			// become pending records: delivered at the next tick's START phase if the server
+			// lives (as unchecked computer.signal, needing no player), or persisted by
+			// writeToNBT if it does not. See docs/dev/INPUT-GESTURE-PERSISTENCE.md.
+			flushWatcherLocked(watcherUuid);
 		}
 	}
 
@@ -766,12 +802,12 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 			// does not know a key is down. That is a real gap and it predates this code; it is
 			// recorded in ROADMAP rather than half-addressed here.
 			if (!host.isSubscribed(watcherUuid) || input.epoch != scene.epoch()) {
-				flushWatcherLocked(watcherUuid, player);
+				flushWatcherLocked(watcherUuid);
 				return;
 			}
 			TileEntityScreen2 screen = boundScreen;
 			if (screen == null || screen.isInvalid()) {
-				flushWatcherLocked(watcherUuid, player);
+				flushWatcherLocked(watcherUuid);
 				return; // no surface: nothing for the signal's address to be
 			}
 			// REACH CHECK, separate from the render subscription. Subscription answers "who
@@ -800,26 +836,27 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 				// reject what a client sends, and a silent client sends nothing. An earlier
 				// version of this comment credited the gate, which was false until the flush at
 				// the unsubscribe site existed.
-				if (input.kind == MessageCodec.INPUT_POINTER_UP && node != null
+				if (input.kind == MessageCodec.INPUT_POINTER_UP
 						&& input.c >= 0 && input.c <= 2) {
-					int[] r = scene != null ? resolutionLocked() : new int[] { 0, 0 };
-					inputRouter.flushPointer(watcherUuid, input.c, player, node, r[0], r[1]);
+					inputRouter.flushPointer(watcherUuid, input.c);
 				}
 				return;
 			}
+			// No pre-route pending flush here any more, deliberately: the delivery loop runs
+			// at the START phase of every tick, before this event could even have been
+			// drained, so every deliverable record is already gone by the time a press
+			// routes. A pre-route flush could only retry the UNdeliverable ones, which is
+			// exactly what the loop will keep doing anyway.
 			int[] res = resolutionLocked();
 			inputRouter.route(input, watcherUuid, player, screen, res[0], res[1]);
 		}
 	}
 
 	/** End every gesture this watcher holds, wherever it holds them. Caller holds sceneLock. */
-	private void flushWatcherLocked(String watcherUuid, EntityPlayer player) {
-		if (node == null) {
-			return;
-		}
-		int[] res = scene != null ? resolutionLocked() : new int[] { 0, 0 };
-		inputRouter.flushWatcher(watcherUuid, player, node, res[0], res[1]);
+	private void flushWatcherLocked(String watcherUuid) {
+		inputRouter.flushWatcher(watcherUuid);
 	}
+
 
 	/** Vanilla's interaction distance, squared — the same bound OC uses for screen input. */
 	private static final double REACH_SQ = 64.0;
@@ -852,6 +889,9 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 			}
 			String key = player.getUniqueID().toString();
 			int[] res = resolutionLocked();
+			// No pre-route pending flush at either route() entry point any more: the
+			// delivery loop runs at every tick's START phase, so deliverable records are
+			// gone before any in-world click of this tick is processed.
 			inputRouter.route(new MessageCodec.Input(scene.sceneId, scene.epoch(),
 					MessageCodec.INPUT_POINTER_DOWN, x, y, button), key, player, screen,
 					res[0], res[1]);
@@ -890,6 +930,10 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 		// (OC's TextBuffer.save pauses with no callback-shared lock held, for this reason.)
 		pauseConnectedMachines();
 		synchronized (sceneLock) {
+			// BEFORE the scene==null early return below. A GPU can hold a gesture whose
+			// scene has not been restored yet this session, and returning early would drop
+			// the very records this exists to keep.
+			writeHeldGesturesLocked(tag);
 			if (scene == null) {
 				// Not yet initialized this session: pass the untouched restore payload through.
 				if (pendingStructure != null) {
@@ -920,6 +964,99 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 			}
 			freedSinceSave.clear();
 			writeImplicitIds(tag);
+		}
+	}
+
+	/**
+	 * Persist every gesture this GPU believes is held, so it can be released on the far
+	 * side of the reload.
+	 *
+	 * Necessary because the server's record is in-memory only while the program's is in
+	 * Lua state that OpenComputers persists: without this the program wakes up holding a
+	 * button that nothing on the server remembers, and no transition can ever end it.
+	 * Emitting the release at shutdown instead does not work — it reaches disk and is
+	 * dequeued during OC's resume without ever reaching Lua. See
+	 * docs/dev/INPUT-GESTURE-PERSISTENCE.md.
+	 */
+	private void writeHeldGesturesLocked(NBTTagCompound tag) {
+		// Unconditional, unlike the list below: ids only mean anything relative to this
+		// counter, and letting it restart at 1 on reload would let a fresh press mint the
+		// id a pending record still carries. See InputRouter.pointerIdCounter.
+		tag.setInteger("v2ptr", inputRouter.pointerIdCounter());
+		long now = worldObj != null ? worldObj.getTotalWorldTime() : 0L;
+		java.util.List<InputRouter.PendingRelease> held = inputRouter.snapshotForSave(now);
+		if (held.isEmpty()) {
+			return;
+		}
+		NBTTagList list = new NBTTagList();
+		for (InputRouter.PendingRelease r : held) {
+			NBTTagCompound e = new NBTTagCompound();
+			e.setString("w", r.watcher);
+			e.setInteger("b", r.button);
+			e.setInteger("i", r.id);
+			e.setString("s", r.address);
+			e.setInteger("x", r.x);
+			e.setInteger("y", r.y);
+			e.setLong("t", r.recordedAt);
+			list.appendTag(e);
+		}
+		tag.setTag("v2held", list);
+	}
+
+	/**
+	 * Under sceneLock, unlike the rest of readFromNBT. The other fields it sets are only
+	 * read once this TE starts ticking, but pendingReleases is touched by serverPump and
+	 * onInput, and a chunk can be read while a neighbouring GPU is already pumping.
+	 */
+	private void readHeldGestures(NBTTagCompound tag) {
+		if (tag.hasKey("v2ptr")) {
+			synchronized (sceneLock) {
+				inputRouter.restorePointerIdCounter(tag.getInteger("v2ptr"));
+			}
+		}
+		if (!tag.hasKey("v2held")) {
+			synchronized (sceneLock) {
+				inputRouter.restorePending(
+						java.util.Collections.<InputRouter.PendingRelease>emptyList());
+			}
+			return;
+		}
+		NBTTagList list = tag.getTagList("v2held", 10);
+		java.util.List<InputRouter.PendingRelease> out =
+				new java.util.ArrayList<InputRouter.PendingRelease>();
+		// Bounded on the way IN as well as out: this list came off disk, and nothing
+		// guarantees the disk was written by us. NEWEST kept — reading from the tail —
+		// because the write side evicts oldest-first and a cap that kept the head would
+		// silently invert that policy on the round trip.
+		int from = Math.max(0, list.tagCount() - InputRouter.MAX_PENDING_RELEASES);
+		for (int i = from; i < list.tagCount(); i++) {
+			NBTTagCompound e = list.getCompoundTagAt(i);
+			String watcher = e.getString("w");
+			String surface = e.getString("s");
+			if (watcher == null || watcher.isEmpty() || surface == null || surface.isEmpty()) {
+				continue; // an unnameable holder or unresolvable surface can never be sent
+			}
+			// Validated like the client path validates its inputs, because the disk is not
+			// trusted either. Button outside 0..2 would emit a release no press can have
+			// produced; ids below 1 cannot have been minted (0 is the scroll path's "no
+			// gesture"); a negative recordedAt makes the expiry subtraction overflow and
+			// the record immortal. Coordinates get a sanity bound rather than a scene check
+			// — emitRelease clamps to the live scene at send time, but only when a scene
+			// exists, and a hand-edited coordinate should not ride through that gap.
+			int button = e.getInteger("b");
+			int id = e.getInteger("i");
+			long recordedAt = e.getLong("t");
+			int x = e.getInteger("x");
+			int y = e.getInteger("y");
+			if (button < 0 || button > 2 || id < 1 || recordedAt < 0
+					|| x < 0 || y < 0 || x > 0x3FFF || y > 0x3FFF) {
+				continue;
+			}
+			out.add(new InputRouter.PendingRelease(watcher, button, id, surface, x, y,
+					recordedAt));
+		}
+		synchronized (sceneLock) {
+			inputRouter.restorePending(out);
 		}
 	}
 
@@ -974,6 +1111,7 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 			pendingStructure = null;
 			pendingSpilled = tag.getBoolean("v2sceneSpilled");
 		}
+		readHeldGestures(tag);
 		implicitCanvasRes = tag.getInteger("v2implicitRes");
 		implicitCanvasNode = tag.getInteger("v2implicitNode");
 		boundScreenAddress = tag.hasKey("v2screen") ? tag.getString("v2screen") : null;
