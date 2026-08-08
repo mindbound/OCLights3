@@ -20,8 +20,14 @@ import opengpu.v2.protocol.V2Wire;
  *   would be lost by truncation, changing later commands' meaning).
  * - OP_CLEAR_RECT (hard set, no blending) truncates regardless of alpha if its rect covers
  *   the full canvas and no transform op has been recorded.
- * After truncation the list becomes [SET_COLOR(current), coveringCommand] so the covering
- * command replays with the color it was issued under.
+ * After truncation the list becomes [SET_COLOR(current), SET_FONT(current) if non-default,
+ * coveringCommand] — the covering command replays with the color it was issued under, and any
+ * ambient state that outlives it is re-established for the commands appended afterwards.
+ *
+ * THE RULE FOR ADDING AMBIENT STATE: any op whose effect persists past the command that
+ * follows it must be tracked here and re-emitted by truncateTo. Truncation deletes the command
+ * that set it while the renderer starts each replay from defaults, so an untracked one is not
+ * just lost — it silently reverts, and only for canvases that happened to compact.
  *
  * Both sides of the wire run this exact logic on the same command stream, so server state
  * and mirrors stay convergent. The command-list cap applies to the visible list; exceeding
@@ -38,6 +44,18 @@ public final class SceneCanvas {
 	private int colorR = 255, colorG = 255, colorB = 255, colorA = 255;
 	private boolean transformTouched = false;
 	private int pushDepth = 0;
+	/**
+	 * The selected font, tracked for exactly the reason the colour is: truncation throws away
+	 * the commands that established it, so the truncated list has to re-establish it or replay
+	 * stops being identical.
+	 *
+	 * It is easy to think a font does not need this — a FILL draws no text. But the list is
+	 * replayed FROM SCRATCH against a renderer that resets to FONT_DEFAULT at the start of every
+	 * canvas, so a SET_FONT deleted by truncation is not merely absent, it is undone: text
+	 * appended AFTER the covering command silently renders in the wrong font, at the wrong cell
+	 * height. That is why the default value here is FONT_DEFAULT and not "unknown".
+	 */
+	private int currentFont = V2Wire.FONT_DEFAULT;
 	/**
 	 * Running encoded size of {@link #visible}, maintained at every point that list changes.
 	 *
@@ -85,9 +103,11 @@ public final class SceneCanvas {
 			colorG = clampChannel(cmd.args[1]);
 			colorB = clampChannel(cmd.args[2]);
 			colorA = clampChannel(cmd.args[3]);
+		} else if (cmd.op == V2Wire.OP_SET_FONT) {
+			currentFont = clampFont(cmd.args[0]);
 		} else if (V2Wire.isTransformOp(cmd.op)) {
 			trackTransform(cmd.op);
-		} else if (covers(cmd)) {
+		} else if (covers(cmd) && truncationFits()) {
 			truncateTo(cmd);
 			return;
 		}
@@ -133,14 +153,53 @@ public final class SceneCanvas {
 		return false;
 	}
 
+	/**
+	 * Whether the truncated list would fit inside {@link #commandCap}.
+	 *
+	 * Compaction REPLACES the list rather than shrinking it, so its output has a floor: two
+	 * commands, or three once a font is selected. Nothing bounded that floor against the cap. The
+	 * append precheck bounds the INPUT — visible + incoming — and is satisfied before compaction
+	 * rewrites anything, so a small-cap canvas could finish an append holding more commands than
+	 * its own cap declares.
+	 *
+	 * That is not a cosmetic overflow. {@code SnapshotCodec.encode} writes the visible list
+	 * without checking the cap, and decode rebuilds the canvas through {@code publish}, which
+	 * DOES check — so the scene's own snapshot stops decoding, every client resync fails, and
+	 * {@code ScenePersistence.restoreOrFresh} answers the CodecException by deleting the scene
+	 * and every texture body it owns.
+	 *
+	 * Declining to compact is always safe: compaction is a bound on GROWTH, never a correctness
+	 * requirement, and the append precheck has already guaranteed the un-compacted list fits.
+	 * The decision converges across the wire because it reads only commandCap — which rides both
+	 * the snapshot and the persisted record — and currentFont, which is tracked identically on
+	 * both sides.
+	 *
+	 * The cap-1 case here predates font tracking: [SET_COLOR, FILL] is two commands against a cap
+	 * of one. The font re-emission widened the broken set rather than creating it, which is why
+	 * this guard covers the shape rather than just the extra command.
+	 */
+	private boolean truncationFits() {
+		return 2 + (currentFont != V2Wire.FONT_DEFAULT ? 1 : 0) <= commandCap;
+	}
+
 	private void truncateTo(CanvasCommand covering) {
 		visible.clear();
 		encodedBytes = 0;
 		visible.add(CanvasCommand.of(V2Wire.OP_SET_COLOR, colorR, colorG, colorB, colorA));
+		// Only when it is not the default, so the ordinary two-command shape is preserved for
+		// every canvas that never selects a font — which is all of them until one does.
+		if (currentFont != V2Wire.FONT_DEFAULT) {
+			visible.add(CanvasCommand.of(V2Wire.OP_SET_FONT, currentFont));
+		}
 		visible.add(covering);
-		encodedBytes = visible.get(0).encodedBytes() + covering.encodedBytes();
+		encodedBytes = 0;
+		for (CanvasCommand cmd : visible) {
+			encodedBytes += cmd.encodedBytes();
+		}
 		transformTouched = false;
 		pushDepth = 0;
+		// currentFont deliberately NOT reset: it is ambient state that survives the covering
+		// command, and the re-emitted SET_FONT above is what keeps replay in step with it.
 	}
 
 	public void publish(List<CanvasCommand> commands) {
@@ -155,6 +214,9 @@ public final class SceneCanvas {
 		colorA = 255;
 		transformTouched = false;
 		pushDepth = 0;
+		// FONT_DEFAULT, matching the renderer's per-canvas reset: a published list that selects
+		// no font must mean Unifont on both sides, not "whatever this canvas held before".
+		currentFont = V2Wire.FONT_DEFAULT;
 		// Rebuild replay-state tracking so later appends compact correctly. This scan is also
 		// the canonical restore path: new SceneCanvas + publish(savedVisibleList) must yield a
 		// canvas whose future appends compact identically to the original (pinned by test).
@@ -164,6 +226,8 @@ public final class SceneCanvas {
 				colorG = clampChannel(cmd.args[1]);
 				colorB = clampChannel(cmd.args[2]);
 				colorA = clampChannel(cmd.args[3]);
+			} else if (cmd.op == V2Wire.OP_SET_FONT) {
+				currentFont = clampFont(cmd.args[0]);
 			} else if (V2Wire.isTransformOp(cmd.op)) {
 				trackTransform(cmd.op);
 			}
@@ -180,6 +244,20 @@ public final class SceneCanvas {
 		return (int) v;
 	}
 
+	/**
+	 * Clamped, not rejected, and identically on both sides of the wire.
+	 *
+	 * Both doors that can record a SET_FONT validate the id first (the callback and
+	 * canvasSubmit), so an out-of-range value should be unreachable here. But this same code
+	 * runs on the MIRROR, against a command list that arrived over the network, and a mirror
+	 * that threw where the server did not would diverge instead of converging — the one failure
+	 * this class exists to prevent. Clamping matches what the renderer does with the same value.
+	 */
+	private static int clampFont(double v) {
+		int id = (int) v;
+		return V2Wire.isValidFont(id) ? id : V2Wire.FONT_DEFAULT;
+	}
+
 	public SceneCanvas copy() {
 		SceneCanvas c = new SceneCanvas(width, height, commandCap);
 		c.visible.addAll(visible);
@@ -192,9 +270,22 @@ public final class SceneCanvas {
 		// pushDepth is replay state like the rest: dropping it here caused silent
 		// post-resync compaction divergence (ORIGIN re-armed on one side only).
 		c.pushDepth = pushDepth;
+		// currentFont is the same kind of state, and omitting it would have the same shape of
+		// consequence: the copy's next truncation would re-emit the wrong font, or none.
+		c.currentFont = currentFont;
 		return c;
 	}
 
+	/**
+	 * Compares the VISIBLE LIST, not the replay state behind it.
+	 *
+	 * Deliberately narrow, and worth knowing what that costs: two canvases can be contentEqual
+	 * while holding different colour, transform or font tracking, and then diverge on their next
+	 * compaction. Callers use this as a convergence oracle, so it hides exactly the class of bug
+	 * that {@link #copy} carries comments about. Widening it is recorded in ROADMAP under
+	 * Defects; it is left alone here because doing it properly means auditing every caller that
+	 * currently passes, which is not this change.
+	 */
 	public boolean contentEquals(SceneCanvas other) {
 		return width == other.width && height == other.height
 				&& commandCap == other.commandCap && visible.equals(other.visible);

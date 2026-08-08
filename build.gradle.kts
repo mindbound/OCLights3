@@ -23,6 +23,45 @@ minecraft_fp {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Make the jar carry its own licence and identity.
+//
+// MMPL-1.0 is a copyleft licence whose terms have to travel with the binary, and until now the
+// jar shipped neither the licence text nor anything identifying itself: the manifest was 25
+// bytes, `Manifest-Version: 1.0` and nothing else. That is a publish blocker rather than a
+// tidiness issue — a redistributed jar with no licence inside is a jar whose recipient has no
+// stated terms.
+//
+// `metaInf` rather than adding LICENSE.md to src/main/resources: the file belongs at the repo
+// root (that is where GitHub and every tool looks for it), and copying it into the source tree
+// would create a second copy to drift.
+//
+// Deliberately `tasks.named<Jar>("jar")`, NOT `withType<Jar>().configureEach`. See the pruning
+// block below for why that distinction is load-bearing here: mutating lazily-realized Jar tasks
+// broke CI once with a Gradle-internal ConcurrentModificationException. Adding a CopySpec and
+// manifest attributes to one named task adds no graph edges, but the narrower form is still the
+// right habit in this build.
+tasks.named<Jar>("jar") {
+    metaInf {
+        from(rootProject.file("LICENSE.md"))
+    }
+    manifest {
+        attributes(
+            "Implementation-Title" to "OpenGPU",
+            "Implementation-Version" to project.version.toString(),
+            "Implementation-Vendor" to "OpenGPU contributors",
+            // MMPL requires source availability alongside binaries. The sources jar is already
+            // built and published to the same Maven repo; this says where to look for it, so the
+            // obligation is discoverable from the artifact rather than only from the repo.
+            //
+            // Must match mcmod.info's "url". The remote is still named OCLights3 while the mod
+            // is OpenGPU — a rename is the owner's call, and when it happens BOTH places move.
+            "Source-Repository" to "https://github.com/mindbound/OCLights3",
+            "License" to "MMPL-1.0 (see META-INF/LICENSE.md)",
+        )
+    }
+}
+
 repositories {
     exclusive(horizon(), "com.github.GTNewHorizons")
     mavenCentral()

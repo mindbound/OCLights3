@@ -197,4 +197,178 @@ public class CanvasSemanticsTest {
 		assertEquals(255, cmd.args[2], 0);
 		assertEquals(255, cmd.args[3], 0);
 	}
+
+	// ---------------------------------------------------------------- font as ambient state
+	//
+	// OP_SET_FONT has OP_SET_COLOR's lifecycle by definition (V2Wire), and compaction is where
+	// that stops being free: truncation deletes the command that selected the font while the
+	// renderer starts every canvas replay at FONT_DEFAULT. So a lost SET_FONT does not leave the
+	// font unset, it REVERTS it — and only for the canvases that happened to compact, which is
+	// why this needs pinning rather than reasoning about.
+
+	@Test
+	public void truncationReEmitsTheSelectedFont() {
+		SceneCanvas canvas = new SceneCanvas(256, 144, 4096);
+		canvas.append(cmds(
+				CanvasCommand.of(V2Wire.OP_SET_FONT, V2Wire.FONT_UNSCII8),
+				CanvasCommand.text(0, 0, "before"),
+				CanvasCommand.of(V2Wire.OP_SET_COLOR, 10, 20, 30, 255),
+				CanvasCommand.of(V2Wire.OP_FILL),
+				CanvasCommand.text(0, 0, "after")));
+
+		// [SET_COLOR, SET_FONT, FILL, text] — the font must be re-established before the text
+		// that follows the covering command, or "after" renders in 8x16 Unifont.
+		List<CanvasCommand> v = canvas.visibleCommands();
+		assertEquals(4, v.size());
+		assertEquals(V2Wire.OP_SET_COLOR, v.get(0).op);
+		assertEquals(V2Wire.OP_SET_FONT, v.get(1).op);
+		assertEquals(V2Wire.FONT_UNSCII8, (int) v.get(1).args[0]);
+		assertEquals(V2Wire.OP_FILL, v.get(2).op);
+		assertEquals("after", v.get(3).text);
+	}
+
+	@Test
+	public void truncationStaysTwoCommandsWhenNoFontWasSelected() {
+		// The common case must not grow. Every canvas that never calls setFont keeps the exact
+		// list shape other tests and the wire-size accounting already assume.
+		SceneCanvas canvas = new SceneCanvas(256, 144, 4096);
+		canvas.append(cmds(
+				CanvasCommand.text(0, 0, "history"),
+				CanvasCommand.of(V2Wire.OP_SET_COLOR, 1, 2, 3, 255),
+				CanvasCommand.of(V2Wire.OP_FILL)));
+		assertEquals(2, canvas.visibleCommands().size());
+	}
+
+	@Test
+	public void aFontSelectedAndThenResetDoesNotSurviveTruncation() {
+		// Tracking the LATEST value, not "a font was once selected". Going back to the default
+		// must return the truncated list to two commands.
+		SceneCanvas canvas = new SceneCanvas(256, 144, 4096);
+		canvas.append(cmds(
+				CanvasCommand.of(V2Wire.OP_SET_FONT, V2Wire.FONT_UNSCII8),
+				CanvasCommand.text(0, 0, "small"),
+				CanvasCommand.of(V2Wire.OP_SET_FONT, V2Wire.FONT_DEFAULT),
+				CanvasCommand.of(V2Wire.OP_SET_COLOR, 1, 2, 3, 255),
+				CanvasCommand.of(V2Wire.OP_FILL)));
+		assertEquals(2, canvas.visibleCommands().size());
+	}
+
+	@Test
+	public void publishRebuildsFontStateSoLaterAppendsCompactCorrectly() {
+		// The canonical restore path: new SceneCanvas + publish(savedList) must compact
+		// identically to the canvas the list came from. Same obligation the colour and
+		// pushDepth tracking already carry.
+		SceneCanvas restored = new SceneCanvas(256, 144, 4096);
+		restored.publish(cmds(
+				CanvasCommand.of(V2Wire.OP_SET_FONT, V2Wire.FONT_UNSCII8),
+				CanvasCommand.text(0, 0, "restored")));
+
+		restored.append(cmds(
+				CanvasCommand.of(V2Wire.OP_SET_COLOR, 9, 9, 9, 255),
+				CanvasCommand.of(V2Wire.OP_FILL)));
+
+		List<CanvasCommand> v = restored.visibleCommands();
+		assertEquals(3, v.size());
+		assertEquals(V2Wire.OP_SET_FONT, v.get(1).op);
+		assertEquals(V2Wire.FONT_UNSCII8, (int) v.get(1).args[0]);
+	}
+
+	@Test
+	public void publishResetsTheFontToDefault() {
+		// A published list that selects no font means Unifont, matching the renderer's reset —
+		// not "whatever this canvas held before the publish".
+		SceneCanvas canvas = new SceneCanvas(256, 144, 4096);
+		canvas.append(cmds(CanvasCommand.of(V2Wire.OP_SET_FONT, V2Wire.FONT_UNSCII8)));
+		canvas.publish(cmds(CanvasCommand.text(0, 0, "fresh")));
+
+		canvas.append(cmds(
+				CanvasCommand.of(V2Wire.OP_SET_COLOR, 1, 2, 3, 255),
+				CanvasCommand.of(V2Wire.OP_FILL)));
+		assertEquals("no font is selected any more, so no SET_FONT should be re-emitted",
+				2, canvas.visibleCommands().size());
+	}
+
+	// ------------------------------------------------- compaction must respect the command cap
+	//
+	// truncateTo REPLACES the list rather than shrinking it, so its output has a floor — two
+	// commands, or three once a font is selected. Nothing checked that floor against commandCap.
+	// The append precheck bounds the INPUT (visible + incoming <= cap) and is satisfied before
+	// compaction rewrites the list, so a canvas can end up holding more commands than its own cap
+	// declares. That is not a cosmetic overflow: SnapshotCodec.encode writes the list without
+	// checking, and decode rebuilds the canvas via publish(), which DOES check — so the scene's
+	// own snapshot stops decoding, every resync fails, and ScenePersistence.restoreOrFresh
+	// answers the CodecException by deleting the scene and all its texture bodies.
+
+	@Test
+	public void compactionNeverLeavesMoreCommandsThanTheCapAllows() {
+		// cap 2 with a font selected: the truncated shape needs three slots, so compaction must
+		// decline rather than overflow. Compaction is an optimisation; correctness outranks it.
+		SceneCanvas canvas = new SceneCanvas(64, 64, 2);
+		canvas.append(cmds(
+				CanvasCommand.of(V2Wire.OP_SET_FONT, V2Wire.FONT_UNSCII8),
+				CanvasCommand.of(V2Wire.OP_FILL)));
+		assertTrue("held " + canvas.visibleCommands().size() + " commands against a cap of 2",
+				canvas.visibleCommands().size() <= 2);
+	}
+
+	@Test
+	public void compactionRespectsTheCapWithNoFontInvolved() {
+		// The same defect one size down, and it PREDATES font tracking: [SET_COLOR, FILL] is two
+		// commands against a cap of one. Pinned here so the fix covers both, not just the half
+		// the font change widened.
+		SceneCanvas canvas = new SceneCanvas(64, 64, 1);
+		canvas.append(cmds(CanvasCommand.of(V2Wire.OP_FILL)));
+		assertTrue("held " + canvas.visibleCommands().size() + " commands against a cap of 1",
+				canvas.visibleCommands().size() <= 1);
+	}
+
+	@Test
+	public void aCanvasAlwaysAcceptsItsOwnVisibleListBack() {
+		// The consequence, stated as the invariant that actually matters: restore and resync both
+		// rebuild a canvas by publishing its saved visible list, and publish enforces the cap. A
+		// list its own canvas cannot re-publish is a scene that cannot be loaded or resynced.
+		for (int cap = 1; cap <= 4; cap++) {
+			SceneCanvas canvas = new SceneCanvas(64, 64, cap);
+			try {
+				canvas.append(cmds(
+						CanvasCommand.of(V2Wire.OP_SET_FONT, V2Wire.FONT_UNSCII8),
+						CanvasCommand.of(V2Wire.OP_FILL)));
+			} catch (IllegalStateException refused) {
+				// A cap too small for the incoming frame refuses it whole and leaves the canvas
+				// untouched. That is the designed all-or-nothing behaviour, not the defect —
+				// the defect is a canvas that ACCEPTS an append and then holds more than its cap.
+				continue;
+			}
+			new SceneCanvas(64, 64, cap).publish(canvas.visibleCommands());
+		}
+	}
+
+	@Test
+	public void aCapWithRoomStillCompactsAndKeepsTheFont() {
+		// The other half of the pair: declining to compact when it does not fit must not become
+		// declining to compact at all.
+		SceneCanvas canvas = new SceneCanvas(64, 64, 3);
+		canvas.append(cmds(
+				CanvasCommand.of(V2Wire.OP_SET_FONT, V2Wire.FONT_UNSCII8),
+				CanvasCommand.text(0, 0, "history"),
+				CanvasCommand.of(V2Wire.OP_FILL)));
+		List<CanvasCommand> v = canvas.visibleCommands();
+		assertEquals(3, v.size());
+		assertEquals(V2Wire.OP_SET_COLOR, v.get(0).op);
+		assertEquals(V2Wire.OP_SET_FONT, v.get(1).op);
+		assertEquals(V2Wire.OP_FILL, v.get(2).op);
+	}
+
+	@Test
+	public void anOutOfRangeFontIdIsClampedRatherThanThrown() {
+		// This code also runs on the MIRROR, against a list that arrived over the network. A
+		// mirror that threw where the server did not would diverge instead of converge.
+		SceneCanvas canvas = new SceneCanvas(256, 144, 4096);
+		canvas.append(cmds(
+				CanvasCommand.of(V2Wire.OP_SET_FONT, 99),
+				CanvasCommand.of(V2Wire.OP_SET_COLOR, 1, 2, 3, 255),
+				CanvasCommand.of(V2Wire.OP_FILL)));
+		assertEquals("an invalid id tracks as the default, so nothing is re-emitted",
+				2, canvas.visibleCommands().size());
+	}
 }

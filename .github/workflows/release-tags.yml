@@ -5,30 +5,39 @@ name: Release Tags
 # This workflow used to fire on `push: tags: ['*']` with MODRINTH_TOKEN, CURSEFORGE_TOKEN and
 # the Maven deploy credentials forwarded. That made the licensing gate in
 # docs/dev/ROADMAP.md a document guarding an automation that would have breached it: any tag
-# push at all would have published a jar that still ships Mojang's font atlas
-# (assets/opengpu/textures/gui/ascii.png -- all 224 glyph cells 32..255 are byte-identical to
-# the 1.7.10 client's). The gate said "do not publish"; the workflow published.
+# push at all would have published a jar that at the time still shipped Mojang's font atlas
+# (all 224 glyph cells 32..255 byte-identical to the 1.7.10 client's). The gate said "do not
+# publish"; the workflow published.
 #
-# Manual trigger only now, so it cannot fire by accident -- notably not when the first version
+# That specific asset was DELETED on 2026-08-08 and text now comes from GNU Unifont read at
+# runtime from OpenComputers, so the licensing gate itself is closed. This workflow stays
+# disarmed anyway, because the reasons below outlive the gate that prompted it.
+#
+# Manual trigger only, so it cannot fire by accident -- notably not when the first version
 # tag is created (roadmap item B-01), which was the immediate trap: closing that item would
 # have pulled this trigger.
 #
-# Secondary benefit, roadmap item X-03: the reusable workflow below is pinned to @master and
-# upstream checks out its own scripts repo at run time with no `ref:`, so even a SHA pin here
-# cannot fully freeze what executes. With no secrets forwarded there is nothing for a
-# compromised upstream to exfiltrate, which is most of that item's real mitigation.
+# Secondary benefit, roadmap item X-03: the reusable workflow below is pinned to a COMMIT (see
+# the `uses:` line), but upstream checks out its own scripts repo at run time with no `ref:`, so
+# even a SHA pin here cannot fully freeze what executes. With no secrets forwarded there is
+# nothing for a compromised upstream to exfiltrate, which is most of that item's real
+# mitigation.
 #
-# TO RE-ARM, once the publish gate in docs/dev/ROADMAP.md is closed:
+# TO RE-ARM, once you actually intend to publish:
 #   1. restore the trigger:
 #        on:
 #          push:
 #            tags: ['*']          # consider narrowing, e.g. 'v*'
-#   2. restore the secrets block:
+#   2. restore ONLY the secrets whose publish target is configured in build.gradle.kts:
 #        secrets:
 #          MAVEN_DEPLOY_USER: ${{ secrets.MAVEN_DEPLOY_USER }}
 #          MAVEN_DEPLOY_PASSWORD: ${{ secrets.MAVEN_DEPLOY_PASSWORD }}
-#          MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
-#          CURSEFORGE_TOKEN: ${{ secrets.CURSEFORGE_TOKEN }}
+#
+#      As of 2026-08-08 `minecraft_fp { publish { maven { ... } } }` configures a Maven repo and
+#      NOTHING ELSE -- no Modrinth project, no CurseForge project. The MODRINTH_TOKEN and
+#      CURSEFORGE_TOKEN this block used to forward were credentials for platforms this mod does
+#      not publish to, which is the same category of mistake B-03 was filed for: a secret in
+#      flight with no destination. Add a token here only after adding its `publish` target.
 #   3. delete this comment block.
 #
 # Note that a manual run in this state may well fail: the upstream workflow is named

@@ -41,6 +41,23 @@ final class GlyphAtlas {
 	private int cursorCol;
 	private int cursorRow;
 
+	/**
+	 * Set while the caller has a glBegin open, so that rasterizing from inside a batch is
+	 * REPORTED rather than silently wrong.
+	 *
+	 * This guards a bug that shipped once and that no available channel could see. Allocation
+	 * issues glBindTexture/glTexSubImage2D, which are GL_INVALID_OPERATION between glBegin and
+	 * glEnd: a conformant driver drops the upload while {@link #get} still caches the entry, so
+	 * the cell stays blank forever. The development client runs Angelica, which emulates the
+	 * fixed-function pipeline in software and therefore accepts the interleaving — so the defect
+	 * was invisible in game and invisible to the JVM tests, which cannot hold a GL context.
+	 *
+	 * The caller pre-rasterizes before opening its batch, so this cannot fire today. It exists
+	 * so that a future edit which reintroduces the interleaving says so.
+	 */
+	private boolean batchOpen;
+	private boolean reportedBatchViolation;
+
 	/** Where a glyph landed: which page, and its UV rectangle within it. */
 	static final class Entry {
 		final int texture;
@@ -98,7 +115,22 @@ final class GlyphAtlas {
 		return e;
 	}
 
+	/** Called by the renderer around its glBegin/glEnd, so {@link #allocate} can police itself. */
+	void setBatchOpen(boolean open) {
+		batchOpen = open;
+	}
+
 	private Entry allocate(byte[] bits, int cells) {
+		if (batchOpen && !reportedBatchViolation) {
+			// Once, not per glyph: this would otherwise fire for every codepoint of every string
+			// on every frame. Deliberately not an exception — the renderer's convention is that
+			// a replay never throws — but deliberately not silent either.
+			reportedBatchViolation = true;
+			opengpu.OpenGPU.logger.error("GlyphAtlas rasterized inside an open glBegin/glEnd."
+					+ " On a conformant driver the upload is dropped and the glyph cell stays"
+					+ " blank permanently; Angelica's software FFP hides it. Rasterize every"
+					+ " codepoint BEFORE opening the batch — see Canvas2dRenderer.drawText.");
+		}
 		// Never split a wide glyph across a page edge: it could not be drawn as one quad.
 		if (cursorCol + cells > COLS) {
 			cursorCol = 0;

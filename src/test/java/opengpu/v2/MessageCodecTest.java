@@ -159,6 +159,46 @@ public class MessageCodecTest {
 	}
 
 	@Test
+	public void selectedFontSurvivesSnapshotRoundTrip() throws Exception {
+		// Same defect shape as pushDepth below, one field along. SceneCanvas.copy() must carry
+		// currentFont: SceneMirror.applySnapshot installs snapshot.state.copy() as its working
+		// state, so a dropped font leaves the mirror believing the default is selected.
+		//
+		// THE ASSERTION HAS TO COME AFTER A LATER COMPACTION, not at the resync. contentEquals
+		// compares only the visible list, and at the moment of the resync the two lists are
+		// identical either way — the divergence appears when the NEXT covering fill truncates,
+		// because only one side then re-emits the SET_FONT. Asserting at the resync passes with
+		// the field dropped, which is exactly how this class of bug hides.
+		ServerScene server = new ServerScene("scene-f");
+		int canvas = server.createCanvas(64, 64, 4096);
+		ArrayList<CanvasCommand> setup = new ArrayList<CanvasCommand>();
+		setup.add(CanvasCommand.of(V2Wire.OP_SET_FONT, V2Wire.FONT_UNSCII8));
+		setup.add(CanvasCommand.text(0, 0, "before"));
+		server.canvasAppend(canvas, setup);
+		server.sealBatch();
+
+		SceneMirror mirror = new SceneMirror("scene-f");
+		mirror.applySnapshot(SnapshotCodec.decode(SnapshotCodec.encode(server.snapshot())));
+		assertTrue("identical at the resync — which proves nothing on its own",
+				server.state().contentEquals(mirror.state()));
+
+		ArrayList<CanvasCommand> next = new ArrayList<CanvasCommand>();
+		next.add(CanvasCommand.of(V2Wire.OP_SET_COLOR, 1, 2, 3, 255));
+		next.add(CanvasCommand.of(V2Wire.OP_FILL));
+		server.canvasAppend(canvas, next);
+		mirror.applyBatch(opengpu.v2.protocol.BatchCodec.decode(
+				opengpu.v2.protocol.BatchCodec.encode(server.sealBatch())));
+
+		assertTrue("the fill compacted differently on the two sides",
+				server.state().contentEquals(mirror.state()));
+		assertEquals("[SET_COLOR, SET_FONT, FILL] — the font must survive the truncation on the"
+				+ " mirror too, or every later string renders 8x16 instead of 8x8",
+				3, mirror.state().resources.get(canvas).canvas.visibleCommands().size());
+		assertEquals(V2Wire.OP_SET_FONT,
+				mirror.state().resources.get(canvas).canvas.visibleCommands().get(1).op);
+	}
+
+	@Test
 	public void pushDepthSurvivesSnapshotRoundTrip() throws Exception {
 		// SceneCanvas.copy() once dropped pushDepth: after a resync the mirror's ORIGIN
 		// re-armed compaction while the server's did not — silent visible-list divergence.

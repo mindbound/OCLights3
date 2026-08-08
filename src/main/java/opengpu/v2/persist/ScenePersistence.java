@@ -175,14 +175,22 @@ public final class ScenePersistence {
 	 *         the recommended chunk-load policy).
 	 */
 	public static RestoreResult restore(byte[] structure, ResourceStore store) throws CodecException {
-		// Dispatch on the persisted version BEFORE attempting a v3 decode. Doing this from
-		// inside a catch would be catastrophic: restoreOrFresh answers a CodecException by
-		// deleting the scene's stored bodies, so every pre-upgrade world would lose its
-		// textures the first time it loaded.
+		// Dispatch on the persisted version BEFORE attempting a current-version decode. Doing
+		// this from inside a catch would be catastrophic: restoreOrFresh answers a
+		// CodecException by deleting the scene's stored bodies, so every pre-upgrade world
+		// would lose its textures the first time it loaded.
+		//
+		// TWO KINDS OF OLD SAVE, and they need different handling:
+		//   v2  — a genuinely different layout (one content hash where v3 carries three
+		//         fields), so it needs its own decoder.
+		//   v3  — the same layout under an older version number, so decodePersisted reads it
+		//         directly. The 3 -> 4 bump appended an op and moved no field.
+		// decodePersisted, not decode: the strict check belongs on the NETWORK path, where the
+		// peer can be told to upgrade. Here, refusing means deleting the world's scenes.
 		SceneSnapshot decoded =
 				LegacyStructureCodec.peekVersion(structure) == LegacyStructureCodec.V2_VERSION
 						? LegacyStructureCodec.decodeV2(structure)
-						: SnapshotCodec.decode(structure);
+						: SnapshotCodec.decodePersisted(structure);
 		List<String> warnings = new ArrayList<String>();
 		boolean degradedAny = false;
 

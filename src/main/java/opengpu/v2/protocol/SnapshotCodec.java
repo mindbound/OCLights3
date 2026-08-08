@@ -88,11 +88,69 @@ public final class SnapshotCodec {
 		}
 	}
 
+	/**
+	 * Older persisted structure versions this decoder reads AS-IS, beyond the current
+	 * {@link V2Wire#PROTOCOL_VERSION}.
+	 *
+	 * A version belongs here only when its structure layout is byte-identical to the current
+	 * one — when the bump that produced it changed nothing this codec reads. 3 qualifies: the
+	 * 3 → 4 bump appended OP_SET_FONT to the op table and changed no field, and
+	 * {@link BatchCodec#readCommands} decodes commands by arity, so a v3 structure holds only
+	 * ops 1..21 whose arities are untouched.
+	 *
+	 * IF A FUTURE BUMP MOVES, RESIZES OR REORDERS A FIELD, IT DOES NOT BELONG HERE. Write a
+	 * decoder for the old layout instead, as {@link LegacyStructureCodec} does for v2, and
+	 * dispatch on the peeked version. Listing a version here without checking that is how a
+	 * save gets silently MISREAD rather than cleanly rejected, which is worse than the data
+	 * loss this list exists to prevent — a misread structure produces a plausible scene built
+	 * from misaligned bytes.
+	 *
+	 * The rule for the bump itself: when you raise PROTOCOL_VERSION, decide in the same edit
+	 * whether the outgoing version goes in this array. Leaving it out is a decision too, and
+	 * it means every existing world loses its scenes — see ScenePersistence.restoreOrFresh.
+	 *
+	 * ENTRIES ARE PERMANENT, NOT TRANSITIONAL. There is no point at which "everyone has loaded
+	 * by now" makes one safe to drop: a chunk nobody visits keeps its old structure
+	 * indefinitely, and TileEntityGpu2.writeToNBT rewrites a pendingStructure verbatim when the
+	 * TE saves before its scene is initialised. A world can therefore carry a v3 structure
+	 * through any number of v4 sessions.
+	 */
+	private static final short[] LAYOUT_COMPATIBLE_PERSISTED_VERSIONS = { 3 };
+
+	/**
+	 * Network path: strict. A PEER of another vintage is an error — it disagrees about the op
+	 * table, so decoding its payload risks reading one op's argument as another's.
+	 */
 	public static SceneSnapshot decode(byte[] data) throws CodecException {
+		return decode(data, false);
+	}
+
+	/**
+	 * Persistence path: a SAVE of another vintage is not an error where the layout allows it.
+	 *
+	 * The asymmetry with {@link #decode} is the whole point. A peer can be told to upgrade; a
+	 * save on disk cannot, and the caller answers a CodecException by DELETING the scene's
+	 * stored bodies ({@link opengpu.v2.persist.ScenePersistence#restoreOrFresh}). So strictness
+	 * here does not fail safe — it destroys the thing it is protecting.
+	 */
+	public static SceneSnapshot decodePersisted(byte[] data) throws CodecException {
+		return decode(data, true);
+	}
+
+	private static boolean isLayoutCompatible(short version) {
+		for (short v : LAYOUT_COMPATIBLE_PERSISTED_VERSIONS) {
+			if (v == version)
+				return true;
+		}
+		return false;
+	}
+
+	private static SceneSnapshot decode(byte[] data, boolean persisted) throws CodecException {
 		try {
 			DataInputStream in = new DataInputStream(new ByteArrayInputStream(data));
 			short version = in.readShort();
-			if (version != V2Wire.PROTOCOL_VERSION)
+			if (version != V2Wire.PROTOCOL_VERSION
+					&& !(persisted && isLayoutCompatible(version)))
 				throw new CodecException("Unsupported protocol version " + version);
 			String sceneId = in.readUTF();
 			int epoch = in.readInt();

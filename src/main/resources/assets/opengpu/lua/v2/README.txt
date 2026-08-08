@@ -37,5 +37,22 @@ the component directly:
   * The per-tick submit allowance is shared by every computer on the GPU.
     publish() treats exhaustion as back-pressure and retries rather than failing.
 
-The full callback reference is docs/dev/API-V2.md in the mod's repository, and the
-tutorial is docs/dev/TUTORIAL.md. This disk carries the library only.
+This disk carries the library only; user-facing documentation is not written yet.
+
+Until it is, everything is discoverable from inside the game. Every callback carries a
+doc string, so OpenOS's own components command prints the whole surface:
+
+  components -l opengpu
+
+and one at a time, if you know the name:
+
+  local component = require("component")
+  print(component.doc(component.opengpu.address, "drawText"))
+
+Nothing needs hardcoding -- the server reports its own constants:
+
+  gpu:limits()             submit ceilings, command and node caps
+  gpu:version()            { api, protocol, mod } -- branch on api >= N
+  gpu:fontMetrics(font)    cell width and height in pixels; the cell
+                           height IS the line pitch, so never assume it
+  gpu.raw.canvasOps()      canvas op ids and their argument counts

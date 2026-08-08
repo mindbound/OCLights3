@@ -402,18 +402,46 @@ public final class Canvas2dRenderer {
 	 *
 	 * A codepoint with no glyph still advances its cell. Skipping the gap would reflow the
 	 * rest of the line past the width the server already reported.
+	 *
+	 * THE RASTERIZE PASS IS SEPARATE FROM THE DRAW PASS, and that is not an optimisation.
+	 * {@code atlas.get} rasterizes on a cache miss, which issues glBindTexture and
+	 * glTexSubImage2D — and possibly glGenTextures/glTexImage2D for a new page. Those are
+	 * GL_INVALID_OPERATION between glBegin and glEnd, so calling get() from inside the batch
+	 * drops the upload on a conformant driver while the atlas still caches the entry: the cell
+	 * stays blank permanently, and only the first codepoint of the first string ever renders.
+	 * The batching above was already written to keep BINDS out of the batch; the allocation
+	 * hiding inside get() is the same rule and was missed.
+	 *
+	 * Worth knowing why this never showed up in testing: the development client runs Angelica,
+	 * which emulates the fixed-function pipeline in software, so it intercepts the interleaved
+	 * calls rather than rejecting them. In-game verification structurally could not see this.
 	 */
 	private void drawText(String text, double x, double y) {
 		opengpu.v2.font.GlyphSource font = FontMetrics.fontWithGlyphs(currentFont);
 		GlyphAtlas atlas = atlasFor(currentFont, font);
 		int glyphHeight = font.cellHeight();
 		int cellWidth = font.cellWidth();
+
+		// Pass 1: rasterize every glyph this string needs, before any batch is open. Entries are
+		// cached, so pass 2 is guaranteed to be pure drawing. Cheap in the steady state — every
+		// get() after the first frame is a map hit.
+		for (int j = 0; j < text.length(); ) {
+			int cp = text.codePointAt(j);
+			j += Character.charCount(cp);
+			atlas.get(cp);
+		}
+
 		setTexturing(true);
 		color();
 		double pen = x;
 		int boundTexture = -1;
 		boolean drawing = false;
 		int i = 0;
+		// Pass 2: pure drawing. Every get() here is a map hit or a null — a codepoint the font
+		// has no bitmap for returns null without touching GL, so nothing in this loop can issue
+		// a texture call. The atlas is told the batch is open so it can say so if that ever
+		// stops being true.
+		atlas.setBatchOpen(true);
 		while (i < text.length()) {
 			int cp = text.codePointAt(i);
 			i += Character.charCount(cp);
@@ -449,6 +477,7 @@ public final class Canvas2dRenderer {
 		if (drawing) {
 			GL11.glEnd();
 		}
+		atlas.setBatchOpen(false);
 	}
 
 	/**
