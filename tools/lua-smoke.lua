@@ -44,6 +44,13 @@ local function record(name)
         rotate = { op = 16, args = 1 }, rotateAround = { op = 17, args = 3 },
         scale = { op = 18, args = 2 }, push = { op = 19, args = 0 },
         pop = { op = 20, args = 0 }, origin = { op = 21, args = 0 },
+        -- THIS TABLE IS A HAND-MAINTAINED MIRROR OF V2Wire's, and it drifted the moment
+        -- OP_SET_FONT landed: the op existed on the server for a day while this stub still
+        -- stopped at 21, so any smoke check of Canvas:setFont would have failed against the
+        -- FIXTURE rather than the library. Add an op here in the same change that adds it to
+        -- V2Wire. The library looks op ids up through canvasOps precisely so it never hardcodes
+        -- them, which means a stale stub is indistinguishable from a broken library.
+        setFont = { op = 22, args = 1 },
       }
     elseif name == "getEpoch" then
       return 12345
@@ -55,6 +62,17 @@ local function record(name)
       }
     elseif name == "getVersion" then
       return { api = 2, protocol = 3, mod = "0.0.0-stub" }
+    elseif name == "getTextWidth" then
+      -- Deliberately ARTIFICIAL, and encoding the font id in the answer. This stub tests the
+      -- library's argument PLUMBING -- did the font the caller selected reach the server call --
+      -- and real advances would make that unprovable, because both shipped fonts are 8px wide
+      -- for ASCII and so a wrong font would return the right number. Real metrics are covered by
+      -- FontMetricsGoldenTest on the JVM side and by ingame/fonttest.lua.
+      local args = table.pack(...)
+      return #tostring(args[1]) * 8 + (args[2] or 0) * 10000
+    elseif name == "getFontMetrics" then
+      local args = table.pack(...)
+      return 8, (args[1] == 1) and 8 or 16
     elseif name == "clearNodes" then
       return 0
     elseif name == "canvasSubmit" then
@@ -68,7 +86,8 @@ for _, m in ipairs({ "canvasOps", "getEpoch", "clearNodes", "createCanvas", "cre
                      "createSprite", "canvasSubmit", "setNodeTransform", "setNodeZ",
                      "setNodeVisible", "setNodeTint", "freeNode", "freeCanvas",
                      "getSubmitBudget", "setColor", "fill", "clear", "drawText",
-                     "getLimits", "getVersion", "swapVisibility" }) do
+                     "getLimits", "getVersion", "swapVisibility",
+                     "setFont", "getFontMetrics", "getTextWidth" }) do
   proxy[m] = record(m)
 end
 
@@ -98,6 +117,10 @@ oldProxy.getVersion = nil
 -- one that has actually bitten in game, where OpenOS serves a cached proxy after a jar update --
 -- was unreachable by the suite, and hit "attempt to call a nil value" inside the library.
 oldProxy.swapVisibility = nil
+-- And predates setFont, for the same reason: the stale-proxy path is the one that actually bites
+-- in development, and a wrapper that calls a nil callback fails with "attempt to call a nil
+-- value" instead of telling you to reboot the computer.
+oldProxy.setFont = nil
 
 package.loaded["component"] = setmetatable({ opengpu = proxy, proxy = function(a)
                                                  if a == "stub-address" then return proxy end
@@ -205,6 +228,73 @@ check(type(ver) == "table" and ver.api == 2, "version() reports the api level")
 check(ver.protocol == 3 and ver.mod == "0.0.0-stub", "version() reports protocol and mod")
 ver.api = 99
 check(gpu:version().api == 2, "version() returns a copy, not the live table")
+
+-- ---- fonts -----------------------------------------------------------------
+--
+-- The font API shipped on 2026-08-08 with NO coverage here at all, which is how three defects
+-- reached a play-test. What this section can check is the library's argument plumbing: that the
+-- font a caller selects reaches the server call, and that the name-to-id mapping is not silently
+-- lenient. What it CANNOT check is whether the widths are right -- that needs real font records,
+-- and lives in FontMetricsGoldenTest and ingame/fonttest.lua.
+--
+-- The stub encodes the font id into getTextWidth's answer on purpose. Both shipped fonts are 8px
+-- wide for ASCII, so a plumbing bug that forwarded the WRONG font would return the RIGHT number
+-- against realistic values -- the fixture has to be able to tell them apart or the check is
+-- decorative.
+
+local FONT_MARKER = 10000  -- matches the stub: width = #text * 8 + fontId * FONT_MARKER
+
+check(gpu:textWidth("abcd") == 4 * 8, "textWidth defaults to unifont (id 0)")
+check(gpu:textWidth("abcd", "unscii8") == 4 * 8 + FONT_MARKER,
+      "textWidth forwards the selected font", tostring(gpu:textWidth("abcd", "unscii8")))
+check(gpu:textWidth("abcd", 1) == 4 * 8 + FONT_MARKER, "textWidth accepts a raw wire id")
+check(gpu:textWidth("abcd", "unifont") == gpu:textWidth("abcd"),
+      "naming the default is the same as omitting it")
+check(not pcall(function() return gpu:textWidth("x", "comic-sans") end),
+      "an unknown font NAME raises rather than defaulting")
+
+local mw, mh = gpu:fontMetrics("unscii8")
+check(mw == 8 and mh == 8, "fontMetrics forwards the font", ("%sx%s"):format(mw, mh))
+local uw, uh = gpu:fontMetrics()
+check(uw == 8 and uh == 16, "fontMetrics defaults to unifont")
+check(mh ~= uh, "the two fonts report DIFFERENT line pitch -- the reason this call exists")
+
+-- Immediate mode. Added because the display canvas had no setFont wrapper for a day: the
+-- callback, the op and Canvas:setFont all existed while the most obvious spelling did not.
+check(gpu:setFont("unscii8") == gpu, "gpu:setFont chains")
+check(calls[#calls].name == "setFont" and calls[#calls].args[1] == 1,
+      "gpu:setFont posts the resolved id, not the name")
+check(not pcall(function() gpu:setFont("comic-sans") end), "gpu:setFont refuses an unknown name")
+check(not pcall(function() gpu:setFont() end), "gpu:setFont refuses a missing font")
+
+-- Canvas-level. The op id comes from canvasOps, never a literal, so this also fails if the
+-- stub's op table drifts from V2Wire's.
+local fc = gpu:canvas(64, 64)
+check(fc:setFont("unscii8") == fc, "Canvas:setFont chains")
+check(fc:textWidth("abcd") == 4 * 8 + FONT_MARKER,
+      "Canvas:textWidth measures with the canvas's OWN font, not the default")
+local plain = gpu:canvas(64, 64)
+check(plain:textWidth("abcd") == 4 * 8,
+      "a canvas that selected no font measures as unifont")
+check(not pcall(function() fc:setFont("comic-sans") end), "Canvas:setFont refuses an unknown name")
+fc:text(0, 0, "hi")
+fc:publish()
+local sawSetFont = false
+for i = 1, #calls do
+  if calls[i].name == "canvasSubmit" then sawSetFont = true end
+end
+check(sawSetFont, "a canvas carrying setFont still submits")
+fc:free()
+plain:free()
+
+-- A component predating setFont must say so rather than calling nil, and must say REBOOT --
+-- OpenOS caches the proxy and OC persists Lua state, so a client restart does not rebuild it.
+-- Reuses the existing old-address fixture, which exists for exactly this.
+local oldFontGpu = opengpu.bind("old-address")
+local fontOk, fontErr = pcall(function() oldFontGpu:setFont("unscii8") end)
+check(not fontOk, "setFont on a component predating it raises rather than calling nil")
+check(not fontOk and tostring(fontErr):lower():find("reboot") ~= nil,
+      "and the message says to reboot the computer", tostring(fontErr))
 
 -- The load-bearing one: chunking must follow the SERVER's ceiling.
 local tiny = opengpu.bind("tiny-address")

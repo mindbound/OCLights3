@@ -807,6 +807,42 @@ function Gpu:textWidth(str, font)
 end
 
 --[[
+  Select the font for subsequent immediate-mode gpu:text(), on the display canvas.
+
+  The counterpart of Canvas:setFont for the display canvas, which had no wrapper at all until
+  2026-08-08 even though the callback, the wire op and Canvas:setFont all existed -- so the most
+  ordinary way to use a font, `gpu:setFont(...)` then `gpu:text(...)`, was reachable only through
+  gpu.raw. Same lifecycle as setColor: applies until changed, unaffected by push/pop, and RESET
+  at the start of every canvas replay -- which for the display canvas means after anything that
+  rebuilds its command list.
+
+  DELIBERATELY DOES NOT change what gpu:textWidth() measures with. It is tempting to remember the
+  id here and use it as textWidth's default, and that would reintroduce exactly the divergence
+  Gpu:textWidth's own comment above describes: this call records an op into the display canvas's
+  command stream, so a Lua-side memory of "the current font" goes stale the moment that stream is
+  compacted or replaced, and then the measurement and the drawing disagree with nothing to
+  reconcile them. Pass the font to textWidth explicitly, or use Canvas:textWidth on a canvas.
+]]
+function Gpu:setFont(font)
+  -- Gated on the callback rather than on getVersion().api, matching Node:swapWith. A stale
+  -- component proxy is the common case in development -- OpenOS caches it and OC persists Lua
+  -- state, so a newly added callback reads nil in a running computer until it REBOOTS -- and the
+  -- proxy is the thing that is actually missing, so it is the thing worth testing.
+  if self.raw.setFont == nil then
+    error("this GPU has no setFont: the jar predates it, or the component proxy is stale -- "
+        .. "reboot the computer (a client restart does not rebuild the proxy)", 2)
+  end
+  local id = font
+  if type(id) == "string" then
+    id = FONTS[id] or error("unknown font '" .. id .. "' (unifont, unscii8)", 2)
+  elseif id == nil then
+    error("setFont needs a font (unifont, unscii8)", 2)
+  end
+  call("setFont", self.raw.setFont, id)
+  return self
+end
+
+--[[
   Cell width and height in pixels for a font: 8x16 for unifont, 8x8 for unscii8.
 
   The height is the line pitch -- stack rows by it rather than by a constant, because it

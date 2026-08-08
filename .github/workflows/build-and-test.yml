@@ -27,3 +27,48 @@ jobs:
       timeout: 90
       workspace: setupCIWorkspace
       client-only: false
+
+  # The shipped Lua library, which is the mod's entire public interface, had NO automated
+  # coverage in CI at all -- and `ingame/README.md` wrongly claimed otherwise for a while. Three
+  # font defects reached a play-test partly because of that.
+  #
+  # A SEPARATE JOB rather than a Gradle task wired into `check`, and the reason matters. The job
+  # above delegates its whole body to the upstream reusable workflow; we contribute no steps to
+  # it, so we cannot install anything into it. A `check`-attached Gradle Exec task would
+  # therefore have to be guarded on a `lua` binary that ubuntu-latest does not ship -- and would
+  # then skip silently on every CI run, which is precisely the "coverage that never runs" this
+  # exists to fix. Installing the interpreters in a job we own is the only shape that actually
+  # executes.
+  #
+  # BOTH interpreters, because OpenComputers supports 5.3 and 5.4 and OpenOS runs 5.3, so the
+  # version the library actually meets in game is the older one. lua-packcheck exercises the
+  # Lua-5.2 double packer, which is dead code in game and testable only here.
+  #
+  # All three harnesses exit non-zero on failure (verified), so this job genuinely fails rather
+  # than printing FAIL and passing.
+  lua-harnesses:
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned to a commit, consistent with X-03's discipline for the reusable workflow above.
+      # v4 resolved to this SHA on 2026-08-08; bump deliberately, not by drifting a tag.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Install Lua 5.3 and 5.4
+        # apt rather than a setup-lua action: one less third-party action in the supply chain,
+        # for a dependency this trivial.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends lua5.3 lua5.4
+
+      - name: Run the Lua harnesses under both interpreters
+        run: |
+          set -euo pipefail
+          for interp in lua5.3 lua5.4; do
+            echo "::group::$interp"
+            "$interp" -v
+            for harness in tools/lua-smoke.lua tools/lua-packcheck.lua tools/lua-globals.lua; do
+              echo "--- $harness"
+              "$interp" "$harness"
+            done
+            echo "::endgroup::"
+          done
