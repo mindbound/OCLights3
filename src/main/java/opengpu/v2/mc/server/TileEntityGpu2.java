@@ -2311,7 +2311,7 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 		return null;
 	}
 
-	@Callback(direct = true, limit = 256, doc = "function(nodeId:number, x:number, y:number[, rotation:number, scaleX:number, scaleY:number, teleport:boolean]) -- Set a node's transform. Rotation is radians; scale defaults to 1. teleport=true snaps instead of interpolating, for a deliberate jump.")
+	@Callback(direct = true, limit = 256, doc = "function(nodeId:number, x:number, y:number[, rotation:number, scaleX:number, scaleY:number, teleport:boolean]) -- Set a node's transform. Rotation is radians; scale defaults to 1. teleport=true snaps instead of interpolating, for a deliberate jump. Refuses the display node -- input reports scene coordinates and is not transformed with it -- except a reset to identity (0,0,0,1,1), which repairs a display node moved by an older build.")
 	public Object[] setNodeTransform(Context context, Arguments args) throws Exception {
 		int id = args.checkInteger(0);
 		double x = args.checkDouble(1), y = args.checkDouble(2);
@@ -2326,6 +2326,43 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 		synchronized (sceneLock) {
 			requireScene();
 			requireNodeLocked(id);
+			// THE DISPLAY NODE IS THE COORDINATE SPACE, so it cannot be moved within it.
+			//
+			// Rendering honours every node's transform, including this one (Canvas2dRenderer's
+			// beginNode applies x/y/rot/scale unconditionally). INPUT does not, and correctly so:
+			// both paths report SCENE coordinates -- GuiScene.toLogical inverts the letterbox and
+			// the FBO size, onSurfaceClick uses resolutionLocked() -- and nothing anywhere
+			// inverts a node transform.
+			//
+			// For an ordinary canvas node that pairing is right and deliberate: the program
+			// created the node, chose its transform, and owns the hit-testing. For THIS node it
+			// is a trap, because immediate-mode drawing (fill, drawText, filledRectangle...) goes
+			// to the display canvas in scene coordinates, so a transform here silently breaks the
+			// identity "where I drew is where a click reports" for the surface that DEFINES that
+			// space. Nothing in the API hints that the display node even has a transform, and the
+			// symptom is a constant offset between the picture and its own input -- with the
+			// server and every mirror agreeing perfectly, so no convergence check can see it.
+			//
+			// Refused rather than supported. Supporting it means inverting translate+rotate+scale
+			// on BOTH input paths, handling a non-invertible scale, and making this one node
+			// behave unlike every other -- to deliver pan/zoom that a canvas node already
+			// provides, with the coupling explicit and the hit-testing already the program's.
+			//
+			// Visibility is deliberately NOT guarded the same way: hiding this node hides the
+			// immediate-mode layer while other canvas nodes keep rendering, and input keeps
+			// reporting correct scene coordinates for them. That is coherent and useful. Only the
+			// transform decouples drawing from input.
+			// IDENTITY IS PERMITTED, so the guard cannot trap a world that is already wrong.
+			// Nodes persist, so a save written before this check can hold a moved display node,
+			// and a blanket refusal would reject the one call that repairs it — locking in the
+			// exact state being prevented. Setting it back to identity is always allowed.
+			if (id == implicitCanvasNode
+					&& !(x == 0 && y == 0 && rot == 0 && sx == 1 && sy == 1)) {
+				throw new Exception("cannot transform the display node: input reports scene"
+						+ " coordinates and is not transformed with it, so the picture and its"
+						+ " clicks would disagree. Put the content on a canvas node and transform"
+						+ " that instead. (Setting it back to identity is allowed.)");
+			}
 			scene.setTransform(id, x, y, rot, sx, sy, teleport);
 			chunkDirty = true;
 		}
