@@ -105,6 +105,57 @@ public class HexFontTest {
 		assertTrue("and reports itself as widths-only", !f.hasBitmaps());
 	}
 
+	/**
+	 * THE INVARIANT THE TWO LOAD MODES EXIST UNDER: a widths-only load and a with-bitmaps load
+	 * must accept and reject exactly the same records.
+	 *
+	 * They did not. The width was recorded before the payload was decoded and un-recorded only
+	 * inside the with-bitmaps branch, so one corrupt line left the SERVER holding a width the
+	 * CLIENT did not have: getTextWidth answered 2 cells for a double-width record while the
+	 * client's pen, finding no entry, advanced 1. Permanent layout divergence from a single bad
+	 * line, and invisible to convergence checking — both sides hold the identical command list
+	 * and simply draw it differently.
+	 *
+	 * Parameterised over every corruption the decoder can reject, so the property is pinned
+	 * rather than one example of it.
+	 */
+	@Test
+	public void bothLoadModesAcceptAndRejectTheSameRecords() throws Exception {
+		String[] corrupt = {
+			"4E00:" + repeat("00FF", 15) + "00GG", // non-hex digit in the payload
+			"4E00:" + repeat("00FF", 15) + "00 F", // whitespace inside the payload
+			"0041:" + repeat("0F", 15) + "Z0",     // same, single-width record
+		};
+		for (String bad : corrupt) {
+			String text = "0042:" + repeat("0F", 16) + "\n" + bad + "\n";
+			HexFont withBitmaps = parse(text, true);
+			HexFont widthsOnly = parse(text, false);
+
+			int cp = bad.startsWith("0041") ? 0x41 : 0x4E00;
+			assertEquals("advance must not depend on whether bitmaps were kept: " + bad,
+					withBitmaps.advanceCells(cp), widthsOnly.advanceCells(cp));
+			assertEquals("nor must the glyph count: " + bad,
+					withBitmaps.glyphCount(), widthsOnly.glyphCount());
+			assertEquals("nor the malformed count: " + bad,
+					withBitmaps.malformedLines(), widthsOnly.malformedLines());
+			assertEquals("the good record survives on both", 1, withBitmaps.advanceCells(0x42));
+			assertEquals("the good record survives on both", 1, widthsOnly.advanceCells(0x42));
+		}
+	}
+
+	/** A clean font must of course still agree, or the check above proves nothing. */
+	@Test
+	public void bothLoadModesAgreeOnACleanFont() throws Exception {
+		String text = "0041:" + repeat("0F", 16) + "\n4E00:" + repeat("00FF", 16) + "\n";
+		HexFont withBitmaps = parse(text, true);
+		HexFont widthsOnly = parse(text, false);
+		assertEquals(withBitmaps.glyphCount(), widthsOnly.glyphCount());
+		assertEquals(withBitmaps.advanceCells(0x41), widthsOnly.advanceCells(0x41));
+		assertEquals(withBitmaps.advanceCells(0x4E00), widthsOnly.advanceCells(0x4E00));
+		assertEquals(0, withBitmaps.malformedLines());
+		assertEquals(0, widthsOnly.malformedLines());
+	}
+
 	/** UTF-16 surrogate pairs are one codepoint, not two cells' worth of char. */
 	@Test
 	public void stringAdvanceIteratesByCodepoint() throws Exception {

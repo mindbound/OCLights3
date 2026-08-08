@@ -97,6 +97,23 @@ public class OpenGPU {
 	public void preInit(FMLPreInitializationEvent event) {
 		logger = event.getModLog();
 
+		// Immediately after the logger exists and before anything can ask for a font. The font
+		// package is deliberately Minecraft-free -- a headless server measures text through it --
+		// so it reports through a sink rather than reaching for this logger itself. Its default
+		// writes to stderr, so a font problem is never silent even if this line is somehow not
+		// reached; installing the real logger just puts the message where the rest of them are.
+		opengpu.v2.font.FontDiagnostics.setSink(new opengpu.v2.font.FontDiagnostics.Sink() {
+			@Override
+			public void warn(String message) {
+				logger.warn(message);
+			}
+
+			@Override
+			public void error(String message) {
+				logger.error(message);
+			}
+		});
+
 		proxy.registerBlocks();
 
 		V2Net.init();

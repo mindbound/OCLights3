@@ -54,9 +54,10 @@ tasks.named<Jar>("jar") {
             // built and published to the same Maven repo; this says where to look for it, so the
             // obligation is discoverable from the artifact rather than only from the repo.
             //
-            // Must match mcmod.info's "url". The remote is still named OCLights3 while the mod
-            // is OpenGPU — a rename is the owner's call, and when it happens BOTH places move.
-            "Source-Repository" to "https://github.com/mindbound/OCLights3",
+            // Must match mcmod.info's "url". The repository was renamed OCLights3 -> OpenGPU on
+            // 2026-08-08; GitHub redirects the old path, so nothing breaks loudly when these
+            // drift, which is exactly why they need saying out loud. Both move together.
+            "Source-Repository" to "https://github.com/mindbound/OpenGPU",
             "License" to "MMPL-1.0 (see META-INF/LICENSE.md)",
         )
     }

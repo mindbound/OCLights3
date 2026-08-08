@@ -5,7 +5,7 @@
     "description": "GPU-driven pixel graphics for OpenComputers: draw to dedicated screens and multi-block screen walls from Lua.",
     "version": "${modVersion}",
     "mcversion": "${minecraftVersion}",
-    "url": "https://github.com/mindbound/OCLights3",
+    "url": "https://github.com/mindbound/OpenGPU",
     "updateUrl": "",
     "authorList": [
       "mindbound",

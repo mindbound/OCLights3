@@ -24,6 +24,25 @@ public final class FontRegistry {
 
 	private FontRegistry() {}
 
+	/*
+	 * ON DETECTING A ONE-SIDED FALLBACK — what is delivered here, and what is not.
+	 *
+	 * The fallback's whole safety argument is that BOTH sides take it: it advances every
+	 * codepoint one cell, so two peers that both fell back still agree, while one that fell back
+	 * and one that did not disagree on every double-width glyph — CJK measured at half its drawn
+	 * width, permanently, and convergence checking blind to it because the command lists are
+	 * identical and only the drawing differs.
+	 *
+	 * The delivered mechanism is the ERROR logged below, naming the side. That is all. A first
+	 * draft also recorded the fact in a pair of arrays behind a hasFallenBack() accessor; it was
+	 * removed because NOTHING READ IT — state with no reader is the same kind of decoration as a
+	 * javadoc with no behaviour behind it, and this file has already paid for one of those.
+	 *
+	 * Actually detecting the mismatch needs the loaded glyph count on the wire so the two sides
+	 * can compare. That is a protocol change, deliberately not made here, and recorded in
+	 * ROADMAP under Defects.
+	 */
+
 	/**
 	 * The font for a wire id, never null.
 	 *
@@ -44,9 +63,18 @@ public final class FontRegistry {
 			// Degraded but DETERMINISTIC and identical on both sides. A font that failed to
 			// load must not mean "each side guesses": a server measuring differently from the
 			// client's pen corrupts layout silently, which is worse than measuring crudely.
-			opengpu.OpenGPU.logger.warn("v2: font id " + fontId + " could not be loaded;"
-					+ " falling back to blank monospace metrics. Text will measure but not"
-					+ " render.");
+			//
+			// ERROR rather than warn, and via FontDiagnostics rather than OpenGPU.logger. The
+			// old call made this class's "Minecraft-free" promise false, and OpenGPU.logger is
+			// assigned in preInit -- so a load reached before then threw NullPointerException
+			// from inside the very path that exists to keep things working.
+			FontDiagnostics.error("font '" + nameOf(fontId) + "' (id " + fontId + ", "
+					+ (withBitmaps ? "client/with bitmaps" : "server/widths only")
+					+ ") could not be loaded; falling back to blank monospace metrics. Text will"
+					+ " measure but not render, and EVERY codepoint counts as one cell -- so if"
+					+ " the other side loaded this font successfully, their layouts now disagree"
+					+ " on every double-width glyph. Check that OpenComputers' font.hex is"
+					+ " readable on BOTH the client and the server.");
 			loaded = new MonospaceFallback(fontId == V2Wire.FONT_UNSCII8 ? 8 : 16);
 		}
 		cache[fontId] = loaded;
@@ -90,7 +118,20 @@ public final class FontRegistry {
 		return -1;
 	}
 
-	/** Drop cached fonts. Client resource reload only; the server has no reason to call it. */
+	/**
+	 * Drop cached fonts, so the next {@link #get} reloads from the classpath.
+	 *
+	 * NO CALLER ANYWHERE TODAY — not in production and not in the tests. It was written for a
+	 * client resource reload and nothing wires one up; the fonts are read from the classpath
+	 * rather than through Minecraft's resource manager (see {@link HexFont}'s javadoc for why),
+	 * so a resource-pack reload cannot change them and there is nothing for a reload hook to do.
+	 * Kept as what a future "reload fonts" command would call.
+	 *
+	 * If one is ever wired up it must also dispose the client's {@code GlyphAtlas} instances:
+	 * each atlas holds a hard reference to the {@code GlyphSource} it was built from, so
+	 * invalidating here alone would leave the pen reading advances from a new font while the
+	 * quads still come from the old atlas.
+	 */
 	public static synchronized void invalidate() {
 		for (int i = 0; i < V2Wire.FONT_COUNT; i++) {
 			WIDTHS_ONLY[i] = null;

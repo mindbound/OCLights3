@@ -162,15 +162,30 @@ public final class HexFont implements GlyphSource {
 					malformed++;
 					continue;
 				}
+				// DECODED ON BOTH SIDES, even though a widths-only load throws the bytes away.
+				//
+				// The point is not the bytes, it is that ACCEPTING OR REJECTING A RECORD MUST BE
+				// THE SAME DECISION regardless of withBitmaps. This previously recorded the width
+				// before decoding and un-recorded it only inside the withBitmaps branch, so one
+				// corrupt payload left the server holding a width the client did not: the server
+				// answered getTextWidth with 2 cells for a double-width record while the client's
+				// pen, finding no entry, advanced 1. That is a permanent server/client layout
+				// divergence from a single bad line, and convergence checking cannot see it —
+				// both sides hold the identical command list and simply draw it differently.
+				//
+				// The cost is one throwaway decode per glyph on a widths-only load, paid once per
+				// font per side — NOT at startup: FontRegistry loads lazily, so it lands on the
+				// first getTextWidth / getFontMetrics / drawText that names the font. Cheap next
+				// to what it buys, and much cheaper than a second "is this valid hex" routine
+				// that could itself disagree with the decoder.
+				byte[] rows = decodeHex(line, colon + 1, bits);
+				if (rows == null) {
+					malformed++;
+					continue;
+				}
 				Integer key = Integer.valueOf(codepoint);
 				wide.put(key, Boolean.valueOf(bits == doubleChars));
 				if (withBitmaps) {
-					byte[] rows = decodeHex(line, colon + 1, bits);
-					if (rows == null) {
-						malformed++;
-						wide.remove(key);
-						continue;
-					}
 					glyphs.put(key, rows);
 				}
 			}
@@ -212,15 +227,33 @@ public final class HexFont implements GlyphSource {
 	public static HexFont loadResource(String resource, int cellHeight, boolean withBitmaps) {
 		InputStream in = HexFont.class.getResourceAsStream(resource);
 		if (in == null) {
+			// Both failure paths report. Returning null unannounced is how a font problem became
+			// invisible: the caller degrades to blank monospace metrics by design, so from the
+			// outside a missing font and a working one differ only in that all the text is gone
+			// -- with nothing anywhere saying why.
+			FontDiagnostics.error("font resource not found on the classpath: " + resource
+					+ " (widths" + (withBitmaps ? "+bitmaps" : " only") + ")");
 			return null;
 		}
 		try {
 			try {
-				return parse(in, cellHeight, withBitmaps);
+				HexFont font = parse(in, cellHeight, withBitmaps);
+				if (font.malformedLines() > 0) {
+					// Not a failure -- a font with some bad lines is still usable, and the
+					// remaining glyphs are correct. But a nonzero count is the signal that the
+					// cell height is wrong, which produces a nearly-empty font rather than an
+					// obviously broken one, and the javadoc on parse() promises this is loud.
+					FontDiagnostics.warn(resource + ": " + font.malformedLines()
+							+ " malformed line(s), " + font.glyphCount() + " glyph(s) at "
+							+ HexFont.CELL_W + "x" + cellHeight
+							+ ". A large count usually means the wrong cell height.");
+				}
+				return font;
 			} finally {
 				in.close();
 			}
 		} catch (IOException e) {
+			FontDiagnostics.error("font resource unreadable: " + resource + " -- " + e);
 			return null;
 		}
 	}

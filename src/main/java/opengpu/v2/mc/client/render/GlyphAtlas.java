@@ -202,7 +202,16 @@ final class GlyphAtlas {
 				GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, buf);
 	}
 
-	/** Drop every page. Called on resource reload, where the GL context may have changed. */
+	/**
+	 * Drop every page.
+	 *
+	 * NO CALLER TODAY. This said "Called on resource reload" — it is not called at all, and no
+	 * reload hook exists: the fonts come from the classpath rather than Minecraft's resource
+	 * manager (see {@link opengpu.v2.font.HexFont}), so a resource-pack reload cannot change
+	 * them. Kept for a future reload path, which must call this AND
+	 * {@code FontRegistry.invalidate()} together — invalidating the registry alone would leave
+	 * the pen reading advances from a new font while the quads still came from this atlas.
+	 */
 	void dispose() {
 		for (Integer id : pageTextures) {
 			GL11.glDeleteTextures(id.intValue());
