@@ -162,7 +162,17 @@ check(restAppend, "every later chunk appends, so the first is not overwritten")
 check(not pcall(function() c:fillRect(0, 0, "x", 1) end), "a non-numeric coordinate raises")
 check(not pcall(function() c:fillRect(0, 0, 0 / 0, 1) end), "NaN raises")
 check(not pcall(function() c:drawTexture(c, 0, 0) end), "drawTexture refuses a canvas handle")
-check(not pcall(function() c:text(0, 0, "\xF0\x9F\x98\x80") end), "astral text is refused")
+-- Astral text is ACCEPTED since the move to Unifont, which carries glyphs above the BMP. The
+-- library re-encodes the 4-byte UTF-8 form into the surrogate pair that the server's readUTF
+-- expects; this used to be refused outright. Both an emoji (wide) and U+1D400 (narrow) so a
+-- regression that mishandled one width would not hide behind the other.
+check(pcall(function() c:text(0, 0, "\xF0\x9F\x98\x80") end), "astral text is accepted (emoji)")
+check(pcall(function() c:text(0, 0, "\xF0\x9D\x90\x80") end), "astral text is accepted (U+1D400)")
+check(pcall(function() c:text(0, 0, "a\xF0\x9F\x98\x80b") end), "astral text mixed with ASCII")
+-- A 4-byte lead with a bad continuation must still be caught: the astral path decodes a
+-- codepoint by arithmetic, and feeding it garbage would produce a plausible-looking pair.
+check(not pcall(function() c:text(0, 0, "\xF0\x28\x8C\x28") end), "malformed 4-byte UTF-8 is refused")
+check(not pcall(function() c:text(0, 0, "\xF5\x80\x80\x80") end), "out-of-range lead byte is refused")
 check(not pcall(function() c:text(0, 0, "\xFF\xFE") end), "malformed UTF-8 is refused")
 check(pcall(function() c:text(0, 0, "caf\xC3\xA9") end), "valid 2-byte UTF-8 is accepted")
 c:discard()

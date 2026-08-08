@@ -30,8 +30,6 @@ import opengpu.v2.scene.SceneState;
  * (blend off); pending textures draw nothing (the defined transparent placeholder).
  */
 public final class Canvas2dRenderer {
-	private static final ResourceLocation FONT =
-			new ResourceLocation(opengpu.OpenGPU.ASSET_DOMAIN, "textures/gui/ascii.png");
 	private static final int OVAL_SEGMENTS = 48;
 
 	/** Row-major 2D affine: x' = a*x + c*y + e; y' = b*x + d*y + f. */
@@ -149,6 +147,11 @@ public final class Canvas2dRenderer {
 		local.identity();
 		stack.clear();
 		colR = 1; colG = 1; colB = 1; colA = 1;
+		// Font resets with the colour, and must: it is ambient state in the same command
+		// stream, so a canvas that selected unscii would otherwise leak it into whichever
+		// canvas replayed next. That leak would follow node draw order, making text change
+		// font depending on z-order — a symptom that reads as nondeterministic.
+		currentFont = V2Wire.FONT_DEFAULT;
 		setTexturing(false);
 		updateEffective();
 	}
@@ -172,6 +175,16 @@ public final class Canvas2dRenderer {
 				case V2Wire.OP_SET_COLOR:
 					colR = a[0] / 255.0; colG = a[1] / 255.0; colB = a[2] / 255.0; colA = a[3] / 255.0;
 					break;
+				case V2Wire.OP_SET_FONT: {
+					// Clamped rather than rejected, uniquely on this path. The decoder already
+					// refuses out-of-range ids, so reaching here with one means a save written
+					// by a build that knew more fonts than this one — and rendering the default
+					// beats refusing to draw the canvas at all. The server rejects bad ids at
+					// the callback, which is where a program's mistake is actually catchable.
+					int requested = (int) a[0];
+					currentFont = V2Wire.isValidFont(requested) ? requested : V2Wire.FONT_DEFAULT;
+					break;
+				}
 				case V2Wire.OP_FILL:
 					fillWholeCanvas(canvas.width, canvas.height, false);
 					break;
@@ -377,33 +390,90 @@ public final class Canvas2dRenderer {
 		}
 	}
 
+	/**
+	 * Draw a string from the runtime Unifont atlas.
+	 *
+	 * Two things differ from the old PNG-atlas path and both are load-bearing. Glyphs are
+	 * batched PER PAGE rather than in one GL_QUADS block: the atlas can spill onto several
+	 * textures, and a bind cannot happen inside glBegin/glEnd. And the pen advances by
+	 * {@code metrics.charAdvance}, which the SERVER also used to answer getTextWidth for this
+	 * very string — the two read the same font records, so the client's pen and the server's
+	 * measurement cannot drift.
+	 *
+	 * A codepoint with no glyph still advances its cell. Skipping the gap would reflow the
+	 * rest of the line past the width the server already reported.
+	 */
 	private void drawText(String text, double x, double y) {
-		Minecraft.getMinecraft().getTextureManager().bindTexture(FONT);
+		opengpu.v2.font.GlyphSource font = FontMetrics.fontWithGlyphs(currentFont);
+		GlyphAtlas atlas = atlasFor(currentFont, font);
+		int glyphHeight = font.cellHeight();
+		int cellWidth = font.cellWidth();
 		setTexturing(true);
 		color();
-		FontMetrics metrics = FontMetrics.get();
 		double pen = x;
-		GL11.glBegin(GL11.GL_QUADS);
-		for (int i = 0; i < text.length(); i++) {
-			char ch = text.charAt(i);
-			int glyph = ch < 256 ? ch : '?';
-			double u0 = (glyph % 16) / 16.0;
-			double v0 = (glyph / 16) / 16.0;
-			double u1 = u0 + 1 / 16.0;
-			double v1 = v0 + 1 / 16.0;
-			// Full 8x8 cell quad; the pen advances by the glyph's scanned width.
-			GL11.glTexCoord2d(u0, v0);
-			vertex(pen, y);
-			GL11.glTexCoord2d(u0, v1);
-			vertex(pen, y + FontMetrics.GLYPH_HEIGHT);
-			GL11.glTexCoord2d(u1, v1);
-			vertex(pen + 8, y + FontMetrics.GLYPH_HEIGHT);
-			GL11.glTexCoord2d(u1, v0);
-			vertex(pen + 8, y);
-			pen += metrics.charAdvance(ch);
+		int boundTexture = -1;
+		boolean drawing = false;
+		int i = 0;
+		while (i < text.length()) {
+			int cp = text.codePointAt(i);
+			i += Character.charCount(cp);
+			GlyphAtlas.Entry g = atlas.get(cp);
+			if (g != null) {
+				if (g.texture != boundTexture) {
+					if (drawing) {
+						GL11.glEnd();
+						drawing = false;
+					}
+					GL11.glBindTexture(GL11.GL_TEXTURE_2D, g.texture);
+					boundTexture = g.texture;
+				}
+				if (!drawing) {
+					GL11.glBegin(GL11.GL_QUADS);
+					drawing = true;
+				}
+				double w = g.cells * cellWidth;
+				GL11.glTexCoord2f(g.u0, g.v0);
+				vertex(pen, y);
+				GL11.glTexCoord2f(g.u0, g.v1);
+				vertex(pen, y + glyphHeight);
+				GL11.glTexCoord2f(g.u1, g.v1);
+				vertex(pen + w, y + glyphHeight);
+				GL11.glTexCoord2f(g.u1, g.v0);
+				vertex(pen + w, y);
+			}
+			// Advance even when the glyph is missing: the server measured this string with the
+			// same font and reported a width that included this cell, so skipping the gap
+			// would put every later glyph left of where the layout expects it.
+			pen += font.advanceCells(cp) * cellWidth;
 		}
-		GL11.glEnd();
+		if (drawing) {
+			GL11.glEnd();
+		}
 	}
+
+	/**
+	 * One atlas per font, built on first use.
+	 *
+	 * Per font rather than one shared: cell geometry differs (Unifont 8x16, unscii-8 8x8), so
+	 * a single atlas would need per-entry sizes and could not pack rows uniformly. Needs a GL
+	 * context, hence lazy rather than constructed with the renderer.
+	 */
+	private GlyphAtlas atlasFor(int fontId, opengpu.v2.font.GlyphSource font) {
+		GlyphAtlas atlas = glyphAtlases[fontId];
+		if (atlas == null) {
+			atlas = new GlyphAtlas(font);
+			glyphAtlases[fontId] = atlas;
+		}
+		return atlas;
+	}
+
+	private final GlyphAtlas[] glyphAtlases = new GlyphAtlas[V2Wire.FONT_COUNT];
+
+	/**
+	 * Font for subsequent text, reset per canvas by {@link #beginNode}. See OP_SET_FONT: this
+	 * has OP_SET_COLOR's lifecycle exactly, including being unscoped by PUSH/POP.
+	 */
+	private int currentFont = V2Wire.FONT_DEFAULT;
 
 	/**
 	 * Draw a texture at its own colours, ignoring the canvas draw colour.

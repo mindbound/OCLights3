@@ -14,7 +14,18 @@ public final class V2Wire {
 	// snapshot manifest / resource messages carry (version, knownHash).
 	// v2 was: scene incarnation epoch in batch/snapshot/heartbeat headers.
 	// Discipline: any layout change bumps this in the same change.
-	public static final short PROTOCOL_VERSION = 3;
+	/**
+	 * Bumped 3 -> 4 on 2026-08-08 when OP_SET_FONT was added.
+	 *
+	 * THE BUMP AND THE OP TABLE MUST MOVE TOGETHER, and that is the only thing protecting
+	 * against silent corruption here. The decoder tests this for strict equality and rejects
+	 * unknown ops outright, so a client of the wrong vintage discards the whole batch before
+	 * it can misread anything — which is why the renderer can assert that unknown ops cannot
+	 * arrive. Add an op without bumping this and that guarantee inverts: two builds share a
+	 * version number, disagree about the op table, and an old client decodes the new op's
+	 * argument as some other op's payload. See ProtocolVersionTest.
+	 */
+	public static final short PROTOCOL_VERSION = 4;
 
 	// Delta type ids
 	public static final byte DELTA_NODE_CREATE = 1;
@@ -221,6 +232,33 @@ public final class V2Wire {
 	public static final byte OP_PUSH = 19;
 	public static final byte OP_POP = 20;
 	public static final byte OP_ORIGIN = 21;
+	/**
+	 * Select the font subsequent OP_DRAW_TEXT commands use. Ambient state with exactly
+	 * OP_SET_COLOR's lifecycle: unscoped by PUSH/POP, and reset to {@link #FONT_DEFAULT} at
+	 * the start of every canvas replay. The reset is load-bearing — without it a canvas that
+	 * selected a font would leak it into whichever canvas replayed next, so the symptom would
+	 * follow node draw order and read as nondeterministic.
+	 */
+	public static final byte OP_SET_FONT = 22;
+
+	/**
+	 * GNU Unifont, read at runtime from OpenComputers. 8x16 cells, ~75,000 glyphs covering
+	 * the Basic Multilingual Plane and beyond. The default because it is the one that can
+	 * render an arbitrary string.
+	 */
+	public static final byte FONT_DEFAULT = 0;
+	/**
+	 * unscii-8, bundled. 8x8 cells, ~3,190 glyphs: complete Box Drawing, Block Elements,
+	 * Geometric Shapes and Braille, and NO CJK, kana or Hangul whatsoever. Half the cell
+	 * height, and drawn for an 8px box rather than scaled down from 16.
+	 */
+	public static final byte FONT_UNSCII8 = 1;
+	/** Ids are dense from 0; anything at or above this is rejected rather than clamped. */
+	public static final int FONT_COUNT = 2;
+
+	public static boolean isValidFont(int fontId) {
+		return fontId >= 0 && fontId < FONT_COUNT;
+	}
 
 	/**
 	 * Numeric argument count per canvas op. DRAW_TEXT additionally carries a UTF string.
@@ -249,6 +287,7 @@ public final class V2Wire {
 		0,  // PUSH
 		0,  // POP
 		0,  // ORIGIN
+		1,  // SET_FONT fontId
 	};
 
 	public static int canvasOpArgCount(int op) {

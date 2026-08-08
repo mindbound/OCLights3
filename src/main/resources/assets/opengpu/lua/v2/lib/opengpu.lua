@@ -143,13 +143,33 @@ local FALLBACK_LIMITS = {
   textChars = 8192,             -- V2Wire.MAX_TEXT_CHARS
 }
 
+-- One BMP scalar value as a 3-byte UTF-8 sequence. Arithmetic rather than bitwise operators
+-- on purpose: those are Lua 5.3+ syntax and this library is meant to load on every
+-- architecture OpenComputers offers.
+local function utf8Three(v)
+  return string.char(0xE0 + math.floor(v / 4096),
+                     0x80 + math.floor(v / 64) % 64,
+                     0x80 + v % 64)
+end
+
 local function packUTF(s, maxChars)
   -- Walk the string as UTF-8, validating as we go and counting CHARACTERS -- the server's cap
   -- is in characters while the wire length is in bytes, and the two differ for anything above
   -- ASCII. Validating matters more than it looks: readUTF answers a malformed sequence by
   -- throwing, which fails the WHOLE submit, so one bad byte in one label would discard an
   -- entire frame with an error naming none of it.
+  --
+  -- ASTRAL CHARACTERS ARE RE-ENCODED, NOT REFUSED. The server decodes with readUTF, which
+  -- speaks Java's MODIFIED UTF-8: a codepoint above the BMP is written as a surrogate PAIR of
+  -- two 3-byte sequences (6 bytes), never as one 4-byte sequence. Standard UTF-8 -- which is
+  -- what a Lua string holds -- uses the 4-byte form, so passing it through unchanged would
+  -- make readUTF throw and lose the whole frame. This converts.
+  --
+  -- An earlier version simply refused, on the grounds that the 256-glyph atlas could not draw
+  -- one anyway. That second reason expired when text moved to Unifont, which carries astral
+  -- glyphs; the first was never a reason to refuse, only work to do.
   local chars, i, n = 0, 1, #s
+  local out, plain = nil, 1  -- `out` is built only if something actually needs transforming
   while i <= n do
     local b = s:byte(i)
     local len
@@ -163,10 +183,10 @@ local function packUTF(s, maxChars)
       len = 2
     elseif b < 0xF0 then
       len = 3
+    elseif b < 0xF5 then
+      len = 4
     else
-      -- Astral characters: modified UTF-8 writes a surrogate PAIR rather than one 4-byte
-      -- sequence, and the 256-glyph atlas could not render one anyway.
-      error("drawText: characters outside the Basic Multilingual Plane are not supported", 4)
+      error("drawText: malformed UTF-8 at byte " .. i .. " (invalid lead byte)", 4)
     end
     for k = 1, len - 1 do
       local c = s:byte(i + k)
@@ -174,14 +194,46 @@ local function packUTF(s, maxChars)
         error("drawText: malformed UTF-8 at byte " .. i, 4)
       end
     end
+    if len == 4 then
+      local b1, b2, b3, b4 = s:byte(i, i + 3)
+      local cp = (b1 - 0xF0) * 0x40000 + (b2 - 0x80) * 0x1000
+               + (b3 - 0x80) * 0x40 + (b4 - 0x80)
+      -- Reject overlongs and anything past the last real codepoint before it reaches the
+      -- surrogate arithmetic, which would otherwise produce a garbage pair.
+      if cp < 0x10000 or cp > 0x10FFFF then
+        error("drawText: malformed UTF-8 at byte " .. i .. " (codepoint out of range)", 4)
+      end
+      out = out or {}
+      if plain < i then
+        out[#out + 1] = s:sub(plain, i - 1)
+      end
+      local u = cp - 0x10000
+      out[#out + 1] = utf8Three(0xD800 + math.floor(u / 0x400))
+                   .. utf8Three(0xDC00 + u % 0x400)
+      plain = i + 4
+      -- TWO characters, because that is what the server counts: a Java String holds an astral
+      -- codepoint as a surrogate pair, and the cap it checks is String.length().
+      chars = chars + 2
+    else
+      chars = chars + 1
+    end
     i = i + len
-    chars = chars + 1
   end
   maxChars = maxChars or FALLBACK_LIMITS.textChars
   if chars > maxChars then
     error("drawText: string too long (" .. chars .. " characters, max " .. maxChars .. ")", 4)
   end
-  return string.char(math.floor(n / 256), n % 256) .. s
+  local body = s
+  if out then
+    if plain <= n then
+      out[#out + 1] = s:sub(plain)
+    end
+    body = table.concat(out)
+  end
+  -- Length prefix is the byte count of what actually goes on the wire, which is longer than
+  -- the input whenever an astral character was expanded.
+  local blen = #body
+  return string.char(math.floor(blen / 256), blen % 256) .. body
 end
 
 -- ---------------------------------------------------------------------------
@@ -465,6 +517,46 @@ function Canvas:fill()
   return self
 end
 
+-- Wire font ids. Kept here rather than fetched because they are part of the op arguments, not
+-- the op table -- canvasOps tells us the op id, not what its argument means.
+local FONTS = { unifont = 0, default = 0, unscii8 = 1, ["unscii-8"] = 1 }
+
+--[[
+  Select the font for subsequent text on this canvas.
+
+  Ambient state with exactly setColor's lifecycle: it applies until changed, is NOT saved by
+  push/pop, and resets to unifont at the start of every canvas replay. Do not assume a font
+  carries over from a previous frame -- publish() replaces the command list, so the reset is
+  what you start from.
+
+  The canvas remembers the selection so that Canvas:textWidth measures with the font this
+  canvas will actually draw with. That is the whole reason to track it in Lua: the server's
+  getTextWidth takes an explicit font, and a program measuring with the default while drawing
+  in unscii would silently mis-lay-out every line.
+]]
+function Canvas:setFont(name)
+  checkAlive(self, "setFont")
+  local id = FONTS[name]
+  if not id then
+    error("unknown font '" .. tostring(name) .. "' (unifont, unscii8)", 3)
+  end
+  self.buffer:op("setFont", { id })
+  self.font = id
+  return self
+end
+
+--[[
+  Width of `str` in this canvas's current font, in pixels.
+
+  Prefer this over gpu:textWidth for anything you are about to draw on this canvas: it cannot
+  disagree with what setFont selected, whereas the gpu-level call defaults to unifont whatever
+  the canvas is using.
+]]
+function Canvas:textWidth(str)
+  checkAlive(self, "textWidth")
+  return self.gpu:textWidth(str, self.font or 0)
+end
+
 function Canvas:plot(x, y) checkAlive(self, "plot") self.buffer:op("plot", { x, y }) return self end
 
 function Canvas:line(x1, y1, x2, y2)
@@ -695,7 +787,40 @@ function Gpu:text(x, y, str)
   return self
 end
 
-function Gpu:textWidth(str) return call("getTextWidth", self.raw.getTextWidth, str) end
+--[[
+  Width of `str` in pixels, measured with `font` (a name or wire id; default unifont).
+
+  The font is EXPLICIT rather than a "current font" on the gpu, deliberately. Drawing goes
+  through a canvas's command stream while this call does not, so a gpu-level current font
+  could disagree with what a canvas actually draws with and nothing would reconcile them.
+  When measuring text you are about to draw on a canvas, prefer Canvas:textWidth, which uses
+  that canvas's own font.
+]]
+function Gpu:textWidth(str, font)
+  local id = font
+  if id == nil then
+    id = 0
+  elseif type(id) == "string" then
+    id = FONTS[id] or error("unknown font '" .. id .. "' (unifont, unscii8)", 2)
+  end
+  return call("getTextWidth", self.raw.getTextWidth, str, id)
+end
+
+--[[
+  Cell width and height in pixels for a font: 8x16 for unifont, 8x8 for unscii8.
+
+  The height is the line pitch -- stack rows by it rather than by a constant, because it
+  differs per font and hardcoding 16 silently overlaps every unscii line by 8 pixels.
+]]
+function Gpu:fontMetrics(font)
+  local id = font
+  if id == nil then
+    id = 0
+  elseif type(id) == "string" then
+    id = FONTS[id] or error("unknown font '" .. id .. "' (unifont, unscii8)", 2)
+  end
+  return call("getFontMetrics", self.raw.getFontMetrics, id)
+end
 
 --- An offscreen canvas. Draw into it with Canvas methods, then publish().
 function Gpu:canvas(width, height, commandCap)

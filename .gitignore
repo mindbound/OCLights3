@@ -284,4 +284,9 @@ gradle-app.setting
 # Internal development documentation
 **/docs/
 
+# Scratch harnesses meant to be copied onto an in-game computer, not shipped.
+# (Shipped Lua lives in src/main/resources/assets/opengpu/lua; desktop-runnable
+# Lua lives in tools/.)
+/ingame/
+
 # End of https://www.toptal.com/developers/gitignore/api/java,scala,gradle,kotlin,forgegradle,intellij+all,eclipse,emacs

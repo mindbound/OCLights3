@@ -1,119 +1,100 @@
 package opengpu.v2.mc;
 
-import java.awt.image.BufferedImage;
-import java.io.IOException;
-import java.io.InputStream;
-
-import javax.imageio.ImageIO;
+import opengpu.v2.font.FontRegistry;
+import opengpu.v2.font.GlyphSource;
+import opengpu.v2.protocol.V2Wire;
 
 /**
- * Metrics for the built-in 6x8-style bitmap font atlas (16x16 glyph grid). Loaded from the
- * shipped ascii.png on BOTH sides from the same code path, so the server's getTextWidth and
- * the client's glyph advances are bit-identical by construction (the design's "layout must
- * match client rendering" requirement for the built-in font).
+ * Text measurement — the server's {@code getTextWidth} answer, and the same numbers the
+ * client's pen uses.
  *
- * The advance table is the vanilla FontRenderer pixel-scan: rightmost non-transparent column
- * + 1, glyph space normalized to 8 logical units of height; space is fixed at 4. (The legacy
- * port's accidental 1px space is not preserved — v2 owns its metrics.)
+ * PER FONT, since 2026-08-08. Every method takes a wire font id and resolves it through
+ * {@link FontRegistry}, which is the single place ids become glyph sources. The client draws
+ * from that same registry, so a string measured as font N is drawn with font N by
+ * construction; nothing has to keep two tables agreeing.
  *
- * ImageIO decode only — no AWT rasterization, headless-safe on dedicated servers.
+ * WIDTHS COME FROM THE FONT DATA, NOT FROM SCANNING AN ATLAS. The original implementation
+ * derived advances by scanning a PNG for each glyph's rightmost opaque column, which made the
+ * image and the metrics two sources of truth with nothing checking they agreed. A glyph is now
+ * one or two cells because its font record says so.
+ *
+ * Minecraft-free by design, so a dedicated server can measure headlessly.
  */
 public final class FontMetrics {
+
+	private FontMetrics() {}
+
 	/**
-	 * Deliberately a literal rather than {@code OpenGPU.ASSET_DOMAIN}, which holds the same
-	 * value. This class must stay Minecraft-free so a dedicated server can answer
-	 * {@code getTextWidth} headlessly, and referencing the {@code @Mod} class would drag
-	 * Block, Item and CreativeTabs onto its classpath. Keep the two in step by hand: if the
-	 * asset domain is ever renamed again, this line changes with it.
+	 * Cell height for a font, in pixels: 16 for Unifont, 8 for unscii-8.
+	 *
+	 * Was a public constant until fonts became selectable. It could not stay one — a program
+	 * laying out rows needs the height of the font it is actually drawing with, and a constant
+	 * would have silently meant "Unifont's" everywhere.
 	 */
-	public static final String ATLAS_RESOURCE = "/assets/opengpu/textures/gui/ascii.png";
-	/** Logical glyph height; the atlas cell is normalized to 8 units like vanilla. */
-	public static final int GLYPH_HEIGHT = 8;
-
-	private static volatile FontMetrics instance;
-
-	private final int[] charWidth = new int[256];
-
-	public static FontMetrics get() {
-		FontMetrics local = instance;
-		if (local == null) {
-			synchronized (FontMetrics.class) {
-				local = instance;
-				if (local == null) {
-					local = new FontMetrics();
-					instance = local;
-				}
-			}
-		}
-		return local;
+	public static int glyphHeight(int fontId) {
+		return font(fontId).cellHeight();
 	}
 
-	private FontMetrics() {
-		BufferedImage atlas = null;
-		try {
-			InputStream in = FontMetrics.class.getResourceAsStream(ATLAS_RESOURCE);
-			if (in != null) {
-				try {
-					atlas = ImageIO.read(in);
-				} finally {
-					in.close();
-				}
-			}
-		} catch (IOException ignored) {
-			// Fall through to the fixed-width fallback below.
-		}
-		if (atlas == null) {
-			// Degraded but deterministic on both sides: plain 6px monospace.
-			for (int i = 0; i < 256; i++) {
-				charWidth[i] = 6;
-			}
-			return;
-		}
-		int atlasW = atlas.getWidth();
-		int atlasH = atlas.getHeight();
-		int[] pixels = new int[atlasW * atlasH];
-		atlas.getRGB(0, 0, atlasW, atlasH, pixels, 0, atlasW);
-		int cellH = atlasH / 16;
-		int cellW = atlasW / 16;
-		float scale = 8.0F / cellW;
-		for (int ch = 0; ch < 256; ch++) {
-			if (ch == 32) {
-				charWidth[ch] = 4;
-				continue;
-			}
-			int col = ch % 16;
-			int row = ch / 16;
-			int x = cellW - 1;
-			while (x >= 0) {
-				int px = col * cellW + x;
-				boolean empty = true;
-				for (int y = 0; y < cellH && empty; y++) {
-					int py = (row * cellH + y) * atlasW;
-					if ((pixels[px + py] >> 24 & 255) != 0) {
-						empty = false;
-					}
-				}
-				if (empty) {
-					x--;
-				} else {
-					break;
-				}
-			}
-			charWidth[ch] = (int) (0.5D + (x + 1) * scale) + 1;
-		}
+	/** Pixel width of one cell; a double-width glyph is twice this. */
+	public static int cellWidth(int fontId) {
+		return font(fontId).cellWidth();
 	}
 
-	/** Advance of one character in logical units; unknown code points advance like '?'. */
-	public int charAdvance(char c) {
-		return charWidth[c < 256 ? c : '?'];
+	/**
+	 * Advance of one codepoint in pixels.
+	 *
+	 * A codepoint the font has no glyph for still advances one cell rather than being
+	 * remapped to '?'. With whole scripts absent from some fonts — unscii-8 has no CJK at all
+	 * — substituting a visible character would misreport the width of text that is simply not
+	 * renderable in that font.
+	 */
+	public static int charAdvance(int fontId, int codepoint) {
+		GlyphSource f = font(fontId);
+		return f.advanceCells(codepoint) * f.cellWidth();
 	}
 
-	/** Logical width of a string — the server-side getTextWidth answer. */
-	public int textWidth(String text) {
-		int w = 0;
-		for (int i = 0; i < text.length(); i++) {
-			w += charAdvance(text.charAt(i));
+	/** Cells advanced, for callers laying out on a character grid. */
+	public static int charCells(int fontId, int codepoint) {
+		return font(fontId).advanceCells(codepoint);
+	}
+
+	/**
+	 * Logical width of a string in pixels — the server-side getTextWidth answer.
+	 *
+	 * Iterates by CODEPOINT, not by char. Java strings are UTF-16, so an astral character is
+	 * two chars; a char-wise loop measures one emoji as two glyphs and displaces everything
+	 * after it.
+	 */
+	public static int textWidth(int fontId, String text) {
+		GlyphSource f = font(fontId);
+		return textCells(fontId, text) * f.cellWidth();
+	}
+
+	/** Width in cells, for grid layout. */
+	public static int textCells(int fontId, String text) {
+		GlyphSource f = font(fontId);
+		int cells = 0;
+		int i = 0;
+		while (i < text.length()) {
+			int cp = text.codePointAt(i);
+			cells += f.advanceCells(cp);
+			i += Character.charCount(cp);
 		}
-		return w;
+		return cells;
+	}
+
+	/** The glyph source behind a font id, widths only — the server never rasterizes. */
+	public static GlyphSource font(int fontId) {
+		return FontRegistry.get(fontId, false);
+	}
+
+	/** As {@link #font}, with bitmaps. Client only. */
+	public static GlyphSource fontWithGlyphs(int fontId) {
+		return FontRegistry.get(fontId, true);
+	}
+
+	/** Convenience for the many call sites that only ever meant the default font. */
+	public static int textWidth(String text) {
+		return textWidth(V2Wire.FONT_DEFAULT, text);
 	}
 }

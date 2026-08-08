@@ -10,7 +10,19 @@ on:
 
 jobs:
   build-and-test:
-    uses: FalsePattern/fpgradle-workflows/.github/workflows/build-and-test.yml@master
+    # Pinned to a commit rather than @master (roadmap X-03). PARTIAL BY UPSTREAM'S DESIGN, and
+    # worth knowing exactly how far it goes: this freezes the reusable workflow's own body, but
+    # that workflow checks out its scripts repo at run time with no `ref:`, so the code it
+    # actually executes still floats. Full closure would need a fork or vendoring, which is
+    # disproportionate here.
+    #
+    # The real mitigation is that neither workflow forwards secrets any more — see
+    # release-tags.yml, disarmed 2026-08-08 — so a compromised upstream has nothing to
+    # exfiltrate. Revisit if this repository ever goes public or gains CI secrets.
+    #
+    # Bump deliberately, reading upstream's changelog:
+    #   gh api repos/FalsePattern/fpgradle-workflows/commits/master --jq '.sha'
+    uses: FalsePattern/fpgradle-workflows/.github/workflows/build-and-test.yml@aba382036ac3abcf6fa97dbe5cc8f518a640ec1c
     with:
       timeout: 90
       workspace: setupCIWorkspace

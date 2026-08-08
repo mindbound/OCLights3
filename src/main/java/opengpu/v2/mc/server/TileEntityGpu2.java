@@ -72,6 +72,7 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 	 * </ul>
 	 *
 	 * 1 = the v2 surface as first shipped. 2 = adds getVersion/getLimits. 3 = adds swapVisibility.
+	 * 4 = adds setFont/getFontMetrics and the optional fontId argument to getTextWidth.
 	 *
 	 * The "SAME change" rule above is not decoration: level 3 was late, because swapVisibility
 	 * shipped in the commit after the one that introduced this constant and nobody bumped it. For
@@ -79,8 +80,13 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 	 * builds that did not, which is precisely the distinction the field exists to make — a
 	 * feature-detecting program would have concluded the callback was absent and taken the
 	 * fallback path forever.
+	 *
+	 * Level 4 nearly repeated it verbatim: the font callbacks were written, tested and rendered
+	 * in-game while this constant still said 3. Note what does NOT catch that — the whole point
+	 * of the field is to be readable on a build that lacks the feature, so on the build you are
+	 * developing every check passes and every test is green. Only reading this line does.
 	 */
-	public static final int API_LEVEL = 3;
+	public static final int API_LEVEL = 4;
 	/** Server-side VRAM budget in bytes (textures w*h*4 + canvas command capacity estimate). */
 	public static final long VRAM_BUDGET_BYTES = 16L * 1024 * 1024;
 	/** Budget estimate per canvas command slot (id + args worst case, serialized). */
@@ -1496,9 +1502,45 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 		return null;
 	}
 
-	@Callback(direct = true, doc = "function(text:string):number -- Width of the text in logical units.")
+	@Callback(direct = true, limit = 128, doc = "function(fontId:number) -- Select the font for subsequent drawText. 0=unifont (8x16, full Unicode), 1=unscii8 (8x8, box drawing and braille, no CJK). Resets to 0 at the start of every canvas.")
+	public Object[] setFont(Context context, Arguments args) throws Exception {
+		int fontId = args.checkInteger(0);
+		// REJECTED, not clamped, and this is the asymmetry with the renderer's handling. Here
+		// a bad id is a program's mistake and can still be reported to the program that made
+		// it; by the time a command reaches the client there is nobody left to tell, so the
+		// renderer falls back to the default instead of refusing to draw.
+		if (!V2Wire.isValidFont(fontId)) {
+			throw new Exception("unknown font id " + fontId + " (0.." + (V2Wire.FONT_COUNT - 1) + ")");
+		}
+		synchronized (sceneLock) {
+			record(CanvasCommand.of(V2Wire.OP_SET_FONT, fontId));
+		}
+		return null;
+	}
+
+	@Callback(direct = true, doc = "function(fontId:number):number, number -- Cell width and height in pixels for a font. Line height is the cell height; a double-width glyph is two cells wide.")
+	public Object[] getFontMetrics(Context context, Arguments args) throws Exception {
+		int fontId = args.count() > 0 ? args.checkInteger(0) : V2Wire.FONT_DEFAULT;
+		if (!V2Wire.isValidFont(fontId)) {
+			throw new Exception("unknown font id " + fontId + " (0.." + (V2Wire.FONT_COUNT - 1) + ")");
+		}
+		// Programs need this to lay out rows: the cell height is 16 for unifont and 8 for
+		// unscii-8, so a hardcoded line pitch is wrong for one of them.
+		return new Object[] { Integer.valueOf(FontMetrics.cellWidth(fontId)),
+				Integer.valueOf(FontMetrics.glyphHeight(fontId)) };
+	}
+
+	@Callback(direct = true, doc = "function(text:string[, fontId:number]):number -- Width of the text in logical units, measured with the given font (default 0).")
 	public Object[] getTextWidth(Context context, Arguments args) throws Exception {
-		return new Object[] { FontMetrics.get().textWidth(args.checkString(0)) };
+		String text = args.checkString(0);
+		// Font is an EXPLICIT argument, not a "current font" on this GPU. A stateful current
+		// font would let a program measure with one font and draw with another without any
+		// error — the two calls go through different paths and nothing would reconcile them.
+		int fontId = args.count() > 1 ? args.checkInteger(1) : V2Wire.FONT_DEFAULT;
+		if (!V2Wire.isValidFont(fontId)) {
+			throw new Exception("unknown font id " + fontId + " (0.." + (V2Wire.FONT_COUNT - 1) + ")");
+		}
+		return new Object[] { Integer.valueOf(FontMetrics.textWidth(fontId, text)) };
 	}
 
 	@Callback(direct = true, limit = 256, doc = "function(id:number, x:number, y:number[, tx:number, ty:number, w:number, h:number]) -- Draw a texture (optionally a sub-rectangle) at its own colors. The current draw color does NOT tint it (setColor affects shapes and text only).")
@@ -1850,11 +1892,20 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 		// simply the unchecked door into the same canvas. A NaN would ride the wire, land in
 		// every mirror identically (so no divergence detector fires) and poison the replay.
 		for (int i = 0; i < commands.size(); i++) {
-			double[] a = commands.get(i).args;
+			CanvasCommand cmd = commands.get(i);
+			double[] a = cmd.args;
 			for (int j = 0; j < a.length; j++) {
 				if (Double.isNaN(a[j]) || Double.isInfinite(a[j])) {
 					throw new Exception("command " + (i + 1) + " has a non-finite argument");
 				}
+			}
+			// Font ids are validated HERE as well as in the setFont callback, because this is
+			// the other door into the same command list and the decoder only checks argument
+			// COUNTS, never their meaning. Rejecting here keeps the rule "a submitted command
+			// list is exactly what the callbacks would have produced" — the renderer's clamp
+			// is a last resort for old saves, not a licence to skip validation.
+			if (cmd.op == V2Wire.OP_SET_FONT && !V2Wire.isValidFont((int) a[0])) {
+				throw new Exception("command " + (i + 1) + " selects unknown font id " + (int) a[0]);
 			}
 		}
 
@@ -1965,14 +2016,14 @@ public class TileEntityGpu2 extends TileEntity implements Environment {
 				"fill", "plot", "line", "rectangle", "filledRectangle", "triangle",
 				"filledTriangle", "oval", "filledOval", "clearRectangle", "drawText",
 				"drawTexture", "drawTextureSub", "setColor", "translate", "rotate",
-				"rotateAround", "scale", "push", "pop", "origin" };
+				"rotateAround", "scale", "push", "pop", "origin", "setFont" };
 		byte[] ops = {
 				V2Wire.OP_FILL, V2Wire.OP_PLOT, V2Wire.OP_LINE, V2Wire.OP_RECT,
 				V2Wire.OP_FILL_RECT, V2Wire.OP_TRIANGLE, V2Wire.OP_FILL_TRIANGLE, V2Wire.OP_OVAL,
 				V2Wire.OP_FILL_OVAL, V2Wire.OP_CLEAR_RECT, V2Wire.OP_DRAW_TEXT,
 				V2Wire.OP_DRAW_TEXTURE, V2Wire.OP_DRAW_TEXTURE_SUB, V2Wire.OP_SET_COLOR,
 				V2Wire.OP_TRANSLATE, V2Wire.OP_ROTATE, V2Wire.OP_ROTATE_AROUND, V2Wire.OP_SCALE,
-				V2Wire.OP_PUSH, V2Wire.OP_POP, V2Wire.OP_ORIGIN };
+				V2Wire.OP_PUSH, V2Wire.OP_POP, V2Wire.OP_ORIGIN, V2Wire.OP_SET_FONT };
 		if (names.length != ops.length) {
 			throw new Exception("canvasOps table is malformed");
 		}
